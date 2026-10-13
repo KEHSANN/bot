@@ -1,0 +1,55 @@
+name: Backend quality
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.6
+        env:
+          POSTGRES_USER: vpnstore
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: vpnstore
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U vpnstore -d vpnstore"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7.4.5-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      VPNSTORE_ENVIRONMENT: test
+      VPNSTORE_DATABASE_URL: postgresql+asyncpg://vpnstore:ci-only-password@127.0.0.1/vpnstore
+      VPNSTORE_REDIS_URL: redis://127.0.0.1:6379/15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install locked dependencies
+        run: pip install uv==0.9.2 && uv sync --frozen
+      - name: Formatting
+        run: uv run --frozen ruff format --check .
+      - name: Lint
+        run: uv run --frozen ruff check .
+      - name: Type check
+        run: uv run --frozen mypy app
+      - name: Unit and real-service integration tests
+        run: uv run --frozen pytest --cov=app --cov-report=term-missing --cov-report=xml
+      - name: Dependency audit
+        run: uv run --frozen pip-audit
+      - name: Build container
+        run: docker build -t vpnstore-api:ci .
