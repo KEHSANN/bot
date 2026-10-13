@@ -10,4 +10,4 @@ Docker image build and full Compose startup require a Docker daemon; execution s
 
 Migrations: run `/opt/venv/bin/alembic upgrade head` as a separate controlled migration job with appropriate DDL credentials. Runtime database credentials should have only the least privilege required by implemented operations. Do not race migrations across API replicas. The image contains Alembic configuration and revision files. Development Compose waits for its one-shot migration service; readiness validates the application schema revision.
 
-The foundation Docker build passed in the observed phase-1 GitHub Actions job. No full Compose startup or hosted deployment is claimed. Phase-2 image/config validation results must be reported separately after CI completion.
+The foundation Docker build passed in the observed phase-1 GitHub Actions job. No full Compose startup or hosted deployment is claimed. Phase-2 GitHub Actions jobs also passed, including its migration-containing image build and real Compose configuration validation. Full Compose startup remains unexecuted.

@@ -54,11 +54,12 @@ Actual local checks on 2026-10-13:
 - Migration upgrade, drift check, downgrade, re-upgrade and second drift check passed on disposable `vpnstore_test`. Final full tests reran after lifecycle checks. No SQLite substitution.
 - Initial constraint-edge failures exposed unsafe subtraction/modulo evaluation on malformed data. Replaced with NUMERIC addition and guarded CASE before publication; all tests passed after correction.
 - A mocked context manager initially suppressed the schema-mismatch test exception; fixed its __aexit__ return to False and reran rather than weakening the assertion.
+- Final real uvicorn HTTP smoke passed after migrations: liveness and migration-aware readiness both 200, PostgreSQL and Redis healthy.
 - Locked environment dependency audit: no known advisories.
 - Local default-detector secret scan: ten reviewed fixture/example findings, zero new findings. An invalid synthetic token-format canary produced a genuine GitHub Token detection and failing scan; the canary was removed before publication. An initial canary harness PATH error was corrected and not counted as detector verification.
-- Phase-2 CI, image build and Compose configuration validation: pending publication/run observation. No full Compose startup, production deployment, load tests or external gateway/provider verification claimed.
+- Phase-2 CI observed completed/success for both quality jobs on implementation commit `34287e8a19f63eed76e46293a4e5ba57fc301d08`, including real PostgreSQL/Redis tests, migration lifecycle, formatting/lint/types, secret scan, dependency audit, Compose configuration validation and container build. Jobs: https://github.com/KEHSANN/bot/actions/runs/38351828319/job/115145721745 and https://github.com/KEHSANN/bot/actions/runs/38351823500/job/115145706903. No full Compose startup, production deployment, load tests or external gateway/provider verification claimed.
 
-Phase-2 implementation hash and remote verification will be recorded after publication. Branch remains `feature/platform-foundation`. Draft review: https://github.com/KEHSANN/bot/pull/1.
+Phase-2 implementation commit: `34287e8a19f63eed76e46293a4e5ba57fc301d08`. Verified by remote commit lookup and branch listing pointing to that exact SHA. Branch remains `feature/platform-foundation`. Draft review: https://github.com/KEHSANN/bot/pull/1.
 
 Next required phase: authentication, RBAC enforcement, safe administrator bootstrap and immutable audit. Tables alone do not constitute those features.
 
