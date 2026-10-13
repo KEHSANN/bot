@@ -114,9 +114,15 @@ Actual final local checks:
 - Focused security review: no client amount override or mass assignment; permission/step-up and
   audit rollback enforced; metadata excludes credentials/bodies; database/non-owner tamper tests
   retained. Conservative shared write lock is deliberate, not a load-tested scalability claim.
-- Docker/Compose local execution remains unavailable; hosted CI will verify build/configuration.
+- Docker/Compose local execution remains unavailable; hosted CI passed build/configuration checks.
+  Full Compose startup and production deployment are still not verified.
 
-Publication and hosted CI verification are recorded only after observing the remote commit
-and completed checks. The platform is still not production-ready. Next incomplete phase:
+Publication verified: implementation commit `d8e9434329e910a8fa3be1ef967dc822c0394ee1`;
+remote branch matched and local working tree matched the published files. Both quality jobs
+completed successfully, including real PostgreSQL/Redis tests, migrations, scans, types,
+Compose configuration and Docker build:
+https://github.com/KEHSANN/bot/actions/runs/38401305464/job/115309345869 and
+https://github.com/KEHSANN/bot/actions/runs/38401300576/job/115309329927.
+Branch remains feature/platform-foundation. The platform is still not production-ready. Next incomplete phase:
 **5 — inventory management and atomic import**. Quotes do not reserve inventory, charge a wallet,
 consume a checkout attempt, provision VPNs or enforce order-history purchase limits.
