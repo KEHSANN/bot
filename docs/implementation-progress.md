@@ -40,7 +40,7 @@ Phase 1 local verification on 2026-10-13:
 - Docker build/Compose runtime: not executed (Docker daemon/tooling absent).
 - GitHub Actions: configured; no completed CI run observed and no CI pass claimed.
 
-Publication: phase-1 implementation hash will be recorded immediately after remote verification. Initialization commit: `b4f4b9094d3b758712912b9199c0b8d8d7a6ff77`. Branch: `feature/platform-foundation`.
+Publication verified with GitHub commit lookup and branch listing: phase-1 implementation commit `4750e8f3c6496929dee42119e6cc895747277c3c`; remote branch pointed to that exact SHA. Initialization commit: `b4f4b9094d3b758712912b9199c0b8d8d7a6ff77`. Branch: `feature/platform-foundation`.
 
 Next: PostgreSQL schema and Alembic migrations with real database constraint tests.
 
