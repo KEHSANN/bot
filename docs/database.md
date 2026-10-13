@@ -7,11 +7,11 @@
 - Identity: `users`, `admin_users`, `roles`, `permissions`, `role_permissions`, `admin_role_assignments`, `user_status_history`.
 - Catalog: `product_categories`, `products`, `product_plans`.
 
-UUID internal IDs are independent of Telegram usernames. Optional Telegram IDs are positive BIGINTs with a uniqueness constraint. User state is constrained to active/blocked/suspended/deleted. Role grants use composite primary keys; referenced identities and catalog entities are protected from deletion with RESTRICT foreign keys. These are **schema foundations**, not implemented authentication or authorization services. Administrators and catalog records default to disabled.
+UUID internal IDs are independent of Telegram usernames. Optional Telegram IDs are positive BIGINTs with a uniqueness constraint. User state is constrained to active/blocked/suspended/deleted. Role grants use composite primary keys; referenced identities and catalog entities are protected from deletion with RESTRICT foreign keys. Authentication and server-side authorization were added in revision 0002; see docs/authentication.md. Administrators and catalog records default to disabled.
 
-Products support service type, manual/provisioned mode, category, Persian descriptions, economic flag, display ordering and JSONB object attributes. Plans store duration, quota, device limits, IRT integer price and bounded/aligned randomized increment settings. The quote/pricing engine is not yet implemented. Provider-specific attribute validation and deeper category-cycle validation remain required before exposing mutation endpoints.
+Products support service type, manual/provisioned mode, category, Persian descriptions, economic flag, display ordering and JSONB object attributes. Plans store duration, quota, device limits, IRT integer price and bounded/aligned randomized increment settings. Revision 0003 adds the persisted quote engine; catalog APIs now enforce approved attributes and bounded category-cycle checks. Provider configuration is a separate future domain.
 
-Server-side created timestamps and ORM-managed updated timestamps use timezone-aware columns. User status history is not yet an immutable audit subsystem; that is a later security phase.
+Server-side created timestamps and ORM-managed updated timestamps use timezone-aware columns. User status history is distinct from the append-only security audit added in revision 0002.
 
 ## Money convention
 
@@ -40,8 +40,18 @@ Migration downgrade/upgrade was tested on a disposable PostgreSQL database. **Do
 
 ## Remaining database work
 
-Wallet/immutable ledger, financial transactions, inventory, orders/quotes, payments, provider/provisioning/outbox, referrals, sessions/audit, workflows, campaigns/coupons/support and reporting schemas are not implemented. No mutable placeholder wallet or SQLite substitute is shipped. Financial concurrency and audit immutability remain blockers before enabling sales.
+Wallet/immutable ledger, financial transactions, inventory, orders, payments, provider/provisioning/outbox, referrals, workflows, campaigns/coupons/support and reporting schemas are not implemented. No mutable placeholder wallet or SQLite substitute is shipped. Financial concurrency, inventory reservation, quote consumption and provider/payment integration remain blockers before enabling sales.
 
 ## Revision 0002_admin_security
 
 Adds optional unique validated username and Argon2id hash to existing disabled admin rows, an enabled-requires-credentials constraint, system-role designation, admin_sessions, digest-only admin_tokens, audit_logs and a typed admin_login_enabled setting. Seeds seven explicit roles/27 granular permissions, creates append-only audit triggers, records policy initialization, and does not create/enable a default admin. Existing enabled rows without credentials require trusted backfill/disable before upgrading; no insecure credential is invented. The downgrade removes security tables/credential columns and destroys audit history; only tested on disposable databases. Deploy a separate non-owner runtime group after migrating.
+
+## Revision 0003_catalog_quotes
+
+Adds the supported randomization_method column/check on product_plans and purchase_quotes
+with UUID identity, owner/plan RESTRICT references, per-user request-key uniqueness,
+integer IRT amount, pricing version, timestamps and a JSONB snapshot. Adds an owner/created
+index and a statement-level UPDATE/DELETE/TRUNCATE rejection trigger.
+Runtime grants allow only SELECT/INSERT on quotes. No default quote or sellable product is seeded.
+Readiness expects this revision. Downgrading removes quotes and the method column, destroying
+quote history; lifecycle verification is only for disposable databases, not a production rollback.

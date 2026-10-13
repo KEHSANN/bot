@@ -4,6 +4,7 @@
 CREATE ROLE vpnstore_runtime NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 GRANT USAGE ON SCHEMA public TO vpnstore_runtime;
 GRANT SELECT ON alembic_version TO vpnstore_runtime;
+GRANT SELECT, INSERT ON purchase_quotes TO vpnstore_runtime;
 GRANT SELECT, INSERT ON audit_logs TO vpnstore_runtime;
 GRANT SELECT, UPDATE ON application_settings TO vpnstore_runtime;
 GRANT SELECT, INSERT, UPDATE, DELETE ON users, admin_users, roles, permissions,

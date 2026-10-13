@@ -2,7 +2,7 @@
 
 A Persian-first VPN store under active implementation. **Not production-ready.**
 
-The repository started empty. The implementation includes a runnable FastAPI foundation plus versioned PostgreSQL identity/RBAC/catalog schema and strict IRT currency utilities, not a completed sales bot. Administrator authentication, protected management APIs, RBAC and append-only auditing are implemented. Purchases, payment integrations, VPN provisioning and user interfaces remain unimplemented.
+The repository started empty. The implementation includes a runnable FastAPI foundation plus versioned PostgreSQL identity/RBAC/catalog schema and strict IRT currency utilities, not a completed sales bot. Administrator authentication, protected management APIs, RBAC and append-only auditing are implemented. Catalog management and persisted idempotent IRT quotes are also implemented. Purchases, payment integrations, VPN provisioning and user interfaces remain unimplemented.
 
 ## Local development
 
@@ -39,12 +39,12 @@ cd backend
 uv run --frozen ruff format --check .
 uv run --frozen ruff check .
 uv run --frozen mypy app scripts migrations
-uv run --frozen pytest -m 'not integration' --cov=app
+uv run --frozen pytest -m 'not integration'
 # Use a dedicated disposable *_test database and environment=test.
 # Configure VPNSTORE_DATABASE_URL and VPNSTORE_REDIS_URL for those services.
 uv run --frozen alembic upgrade head
 uv run --frozen alembic check
-uv run --frozen pytest -m integration
+uv run --frozen pytest --cov=app --cov-report=term-missing --cov-report=xml
 uv run --frozen python scripts/check_secrets.py
 uv run --frozen pip-audit
 ```
@@ -54,3 +54,10 @@ Bootstrap/recover using masked terminal prompts; see `docs/authentication.md`. N
 See `docs/architecture.md`, `docs/testing.md`, `docs/security.md`, and `docs/implementation-progress.md`. The full accepted project brief is in `docs/project-requirements.md`.
 
 **Capacity is unmeasured. No claim of 100,000 daily active users or real payment/provider verification is made.**
+
+## Catalog and pricing
+
+Authenticated catalog create/read/update/disable and stable quotes are described in
+`docs/catalog-pricing.md`. Quotes are immutable price snapshots, not purchases or inventory
+reservations. Configure `VPNSTORE_QUOTE_SECONDS` to control their lifetime (default 900 seconds).
+No public customer quote endpoint or provider credentials in catalog attributes are supported.

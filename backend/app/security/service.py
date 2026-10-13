@@ -11,6 +11,7 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.catalog.schemas import CategoryBody, PlanBody, ProductBody, QuoteBody
 from app.core.config import Settings
 from app.models import AdminRoleAssignment, AdminUser, Permission, Role, RolePermission, User
 from app.models.identity import UserStatusHistory
@@ -46,6 +47,11 @@ return allowed
 """
 SECURITY_WRITE_LOCK = 71420931
 ACTION_PERMISSIONS = {
+    "catalog.read": "products.read",
+    "catalog.create": "products.manage",
+    "catalog.update": "products.manage",
+    "quotes.create": "orders.manage",
+    "quotes.read": "orders.read",
     "users.read": "users.read",
     "users.status": "users.manage",
     "products.read": "products.read",
@@ -62,6 +68,8 @@ ACTION_PERMISSIONS = {
 }
 WRITE_ACTIONS = frozenset(
     {
+        "catalog.create",
+        "catalog.update",
         "users.status",
         "roles.create",
         "roles.permissions",
@@ -100,7 +108,7 @@ class Principal:
 
 
 Operation = Callable[[AsyncSession, Context], Awaitable[dict[str, Any]]]
-Body = StepUpBody | RoleBody | GrantBody | StatusBody | SettingBody | CreateAdminBody | None
+Body = StepUpBody | QuoteBody | None
 
 
 class SecurityService:
@@ -526,6 +534,7 @@ class SecurityService:
         target: UUID | None = None,
         limit: int = 50,
         offset: int = 0,
+        kind: str = "",
     ) -> dict[str, Any]:
         async def operation(db: AsyncSession, ctx: Context) -> dict[str, Any]:
             await self._rate(meta)
@@ -539,6 +548,22 @@ class SecurityService:
             if action in WRITE_ACTIONS:
                 assert isinstance(body, StepUpBody)
                 await self._step_up(principal, body, ctx)
+            if action.startswith("catalog."):
+                from app.catalog.service import catalog_operation
+
+                if body is not None and not isinstance(body, (CategoryBody, ProductBody, PlanBody)):
+                    raise SecurityError(422, "invalid_input")
+                return await catalog_operation(db, ctx, action, body, kind, target, limit, offset)
+            if action.startswith("quotes."):
+                from app.catalog.service import quote_operation
+
+                if body is not None and not isinstance(body, QuoteBody):
+                    raise SecurityError(422, "invalid_input")
+                if action == "quotes.create" and body is None:
+                    raise SecurityError(422, "invalid_input")
+                return await quote_operation(
+                    db, ctx, principal, body, target, self.settings.quote_seconds
+                )
             if action == "users.read":
                 user_rows = (
                     await db.scalars(
@@ -813,7 +838,11 @@ class SecurityService:
             raise SecurityError(403, "permission_denied")
 
         return await self._execute(
-            "admin." + action, meta, operation, locked=action in WRITE_ACTIONS, target=target
+            "admin." + action,
+            meta,
+            operation,
+            locked=action in WRITE_ACTIONS or action == "quotes.create",
+            target=target,
         )
 
     async def bootstrap(

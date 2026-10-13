@@ -63,6 +63,9 @@ class ProductPlan(IdentityMixin, Base):
     __tablename__ = "product_plans"
     __table_args__ = (
         UniqueConstraint("product_id", "slug"),
+        CheckConstraint(
+            "randomization_method = 'uniform_discrete'", name="valid_randomization_method"
+        ),
         CheckConstraint("length(title) > 0 AND length(slug) > 0", name="nonempty_labels"),
         CheckConstraint("currency = 'IRT'", name="currency_irt"),
         CheckConstraint("price_minor >= 0", name="price_nonnegative"),
@@ -98,6 +101,7 @@ class ProductPlan(IdentityMixin, Base):
     min_increment: Mapped[int] = mapped_column(BigInteger, server_default="0")
     max_increment: Mapped[int] = mapped_column(BigInteger, server_default="0")
     increment_step: Mapped[int] = mapped_column(BigInteger, server_default="1")
+    randomization_method: Mapped[str] = mapped_column(String(32), server_default="uniform_discrete")
     pricing_version: Mapped[int] = mapped_column(Integer, server_default="1")
     enabled: Mapped[bool] = mapped_column(Boolean, server_default="false")
     attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default="{}")

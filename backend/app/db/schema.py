@@ -1,1 +1,1 @@
-EXPECTED_SCHEMA_REVISION = "0002_admin_security"
+EXPECTED_SCHEMA_REVISION = "0003_catalog_quotes"

@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.types import Scope
 
+from app.catalog.api import router as catalog_router
 from app.core.body_limit import BodyLimitMiddleware
 from app.core.config import Settings
 from app.core.dependencies import Dependencies
@@ -48,6 +49,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.include_router(auth)
     app.include_router(admin)
+    app.include_router(catalog_router)
 
     async def rejected_transport(scope: Scope, status: int) -> int:
         request = Request(scope)

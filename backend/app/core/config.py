@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     )
     dependency_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
     database_pool_size: int = Field(default=10, ge=1, le=100)
+    quote_seconds: int = Field(default=900, ge=60, le=3600)
     access_token_seconds: int = Field(default=300, ge=60, le=900)
     refresh_token_seconds: int = Field(default=86400, ge=600, le=604800)
     session_seconds: int = Field(default=604800, ge=600, le=604800)

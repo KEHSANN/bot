@@ -14,7 +14,16 @@ from sqlalchemy.exc import DBAPIError
 from app.core.config import Settings
 from app.db.session import session_factory
 from app.main import create_app
-from app.models import AdminRoleAssignment, AdminUser, Role, User
+from app.models import (
+    AdminRoleAssignment,
+    AdminUser,
+    Product,
+    ProductCategory,
+    ProductPlan,
+    PurchaseQuote,
+    Role,
+    User,
+)
 from app.models.security import AdminSession, AdminToken, ApplicationSetting, AuditLog
 from app.security.crypto import digest_token
 from app.security.metadata import RequestMetadata, fingerprint
@@ -784,7 +793,7 @@ async def test_nonowner_audit_permissions(harness: Harness) -> None:
     async with h.security.factory() as db, db.begin():
         await db.execute(text(f'CREATE ROLE "{name}" NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE'))
         await db.execute(text(f'GRANT USAGE ON SCHEMA public TO "{name}"'))
-        await db.execute(text(f'GRANT SELECT, INSERT ON audit_logs TO "{name}"'))
+        await db.execute(text(f'GRANT SELECT, INSERT ON audit_logs, purchase_quotes TO "{name}"'))
         await db.execute(text(f'GRANT "{name}" TO CURRENT_USER'))
     try:
         async with h.security.factory() as db, db.begin():
@@ -795,6 +804,10 @@ async def test_nonowner_audit_permissions(harness: Harness) -> None:
             "DELETE FROM audit_logs",
             "TRUNCATE audit_logs",
             "ALTER TABLE audit_logs DISABLE TRIGGER ALL",
+            "UPDATE purchase_quotes SET amount_minor = 0",
+            "DELETE FROM purchase_quotes",
+            "TRUNCATE purchase_quotes",
+            "ALTER TABLE purchase_quotes DISABLE TRIGGER ALL",
         ]:
             with pytest.raises(DBAPIError):
                 async with h.security.factory() as db, db.begin():
@@ -877,3 +890,339 @@ async def test_operator_recovery_has_no_public_route_and_revokes_sessions(harnes
     finally:
         async with h.security.factory() as db, db.begin():
             (await db.get(ApplicationSetting, "admin_login_enabled")).enabled = True
+
+
+async def catalog_fixture(h: Harness):
+    payloads = []
+    ids = []
+    category = dict(kind="categories", slug="cat-" + uuid4().hex, title="دسته", enabled=True)
+    for kind, payload in [
+        ("categories", category),
+        (
+            "products",
+            dict(
+                kind="products",
+                slug="vpn-" + uuid4().hex,
+                title="VPN",
+                service_type="vless",
+                inventory_mode="manual",
+                enabled=True,
+            ),
+        ),
+        (
+            "plans",
+            dict(
+                kind="plans",
+                slug="month",
+                title="ماهانه",
+                price_minor=10000,
+                min_increment=100,
+                max_increment=500,
+                increment_step=100,
+                duration_days=30,
+                traffic_bytes=1073741824,
+                enabled=True,
+            ),
+        ),
+    ]:
+        if kind == "products":
+            payload["category_id"] = ids[0]
+        if kind == "plans":
+            payload["product_id"] = ids[1]
+        response = await h.client.post(
+            "/admin/catalog/" + kind, headers=h.headers, json=payload | step(h)
+        )
+        assert response.status_code == 200, response.text
+        ids.append(response.json()["id"])
+        payloads.append(payload)
+    async with h.security.factory() as db:
+        user = await db.get(AdminUser, h.admin_id)
+        uid = str(user.user_id)
+    return ids, payloads, dict(user_id=uid, plan_id=ids[2], request_key=str(uuid4()))
+
+
+async def test_catalog_crud_permissions_and_validation(harness: Harness) -> None:
+    h = harness
+    ids, payloads, quote = await catalog_fixture(h)
+    for kind, target in zip(("categories", "products", "plans"), ids, strict=True):
+        assert (await h.client.get("/admin/catalog/" + kind)).status_code == 401
+        response = await h.client.get("/admin/catalog/" + kind + "/" + target, headers=h.headers)
+        assert response.status_code == 200 and response.json()["id"] == target
+        assert (await h.client.get("/admin/catalog/" + kind, headers=h.headers)).status_code == 200
+        assert (
+            await h.client.get("/admin/catalog/" + kind + "/" + str(uuid4()), headers=h.headers)
+        ).status_code == 404
+    assert (
+        await h.client.post(
+            "/admin/catalog/categories", headers=h.headers, json=payloads[0] | step(h)
+        )
+    ).status_code == 409
+    assert (
+        await h.client.post("/admin/catalog/plans", headers=h.headers, json=payloads[0] | step(h))
+    ).status_code == 422
+    for change, expected in [({"parent_id": ids[0]}, 409), ({"parent_id": str(uuid4())}, 404)]:
+        assert (
+            await h.client.put(
+                "/admin/catalog/categories/" + ids[0],
+                headers=h.headers,
+                json=payloads[0] | step(h) | change,
+            )
+        ).status_code == expected
+    assert (
+        await h.client.post(
+            "/admin/catalog/products",
+            headers=h.headers,
+            json=payloads[1] | step(h) | {"category_id": str(uuid4())},
+        )
+    ).status_code == 404
+    assert (
+        await h.client.post(
+            "/admin/catalog/plans",
+            headers=h.headers,
+            json=payloads[2] | step(h) | {"product_id": str(uuid4())},
+        )
+    ).status_code == 404
+    assert (
+        await h.client.put(
+            "/admin/catalog/plans/" + str(uuid4()),
+            headers=h.headers,
+            json=payloads[2] | step(h) | {"slug": "new"},
+        )
+    ).status_code == 404
+    assert (await h.client.post("/admin/quotes", json=quote)).status_code == 401
+    _, _, _, auditor = await member(h, "auditor")
+    assert (await h.client.get("/admin/catalog/plans", headers=auditor)).status_code == 200
+    assert (
+        await h.client.post(
+            "/admin/catalog/categories", headers=auditor, json=payloads[0] | step(h)
+        )
+    ).status_code == 403
+    assert (await h.client.post("/admin/quotes", headers=auditor, json=quote)).status_code == 403
+    _, _, password, operations = await member(h, "operations")
+    assert (
+        await h.client.post(
+            "/admin/catalog/categories",
+            headers=operations,
+            json=payloads[0]
+            | dict(
+                slug="ops-" + uuid4().hex, current_password=password, reason="security_response"
+            ),
+        )
+    ).status_code == 200
+    for invalid in [{"amount_minor": 1}, {"user_id": "bad"}, {"request_key": None}]:
+        response = await h.client.post("/admin/quotes", headers=h.headers, json=quote | invalid)
+        assert response.status_code == 422
+    assert (
+        await h.client.put(
+            "/admin/catalog/plans/" + ids[2],
+            headers=h.headers,
+            json=payloads[2] | step(h) | {"current_password": "incorrect"},
+        )
+    ).status_code == 403
+
+
+async def test_quote_stable_across_price_change_sessions_and_concurrency(harness: Harness) -> None:
+    h = harness
+    ids, payloads, quote = await catalog_fixture(h)
+    first = await h.client.post("/admin/quotes", headers=h.headers, json=quote)
+    assert first.status_code == 200
+    stored = first.json()
+    assert stored["amount_minor"] in range(10100, 10501, 100)
+    assert stored["currency"] == "IRT" and stored["pricing_version"] == 1
+    response = await h.client.put(
+        "/admin/catalog/plans/" + ids[2],
+        headers=h.headers,
+        json=payloads[2] | step(h) | {"price_minor": 20000},
+    )
+    assert response.status_code == 200 and response.json()["pricing_version"] == 2
+    assert (await h.client.post("/admin/quotes", headers=h.headers, json=quote)).json() == stored
+    login = await h.client.post(
+        "/auth/login", json={"username": h.username, "password": h.password}
+    )
+    other = {"Authorization": "Bearer " + login.json()["access_token"]}
+    assert (await h.client.post("/admin/quotes", headers=other, json=quote)).json() == stored
+    assert (await h.client.get("/admin/quotes/" + stored["id"], headers=h.headers)).json() == stored
+    assert (
+        await h.client.get("/admin/quotes/" + str(uuid4()), headers=h.headers)
+    ).status_code == 404
+    fresh = quote | {"request_key": str(uuid4())}
+    responses = await asyncio.gather(
+        *[
+            h.client.post("/admin/quotes", headers=headers, json=fresh)
+            for headers in (h.headers, other)
+        ]
+    )
+    assert [r.status_code for r in responses] == [200, 200]
+    assert responses[0].json() == responses[1].json()
+    assert responses[0].json()["pricing_version"] == 2
+    async with h.security.factory() as db:
+        assert (
+            await db.scalar(
+                select(func.count())
+                .select_from(PurchaseQuote)
+                .where(
+                    PurchaseQuote.user_id == UUID(quote["user_id"]),
+                    PurchaseQuote.request_key == UUID(fresh["request_key"]),
+                )
+            )
+            == 1
+        )
+        logs = (
+            await db.scalars(
+                select(AuditLog).where(
+                    AuditLog.target_id == stored["id"], AuditLog.action == "admin.quotes.create"
+                )
+            )
+        ).all()
+        assert len(logs) == 3 and all(a.outcome == "success" for a in logs)
+    second_plan = await h.client.post(
+        "/admin/catalog/plans", headers=h.headers, json=payloads[2] | step(h) | {"slug": "second"}
+    )
+    assert (
+        await h.client.post(
+            "/admin/quotes", headers=h.headers, json=quote | {"plan_id": second_plan.json()["id"]}
+        )
+    ).status_code == 409
+    for statement in [
+        "UPDATE purchase_quotes SET amount_minor = 0",
+        "DELETE FROM purchase_quotes",
+        "TRUNCATE purchase_quotes",
+    ]:
+        with pytest.raises(DBAPIError):
+            async with h.security.factory() as db, db.begin():
+                await db.execute(text(statement))
+    with pytest.raises(DBAPIError):
+        async with h.security.factory() as db, db.begin():
+            (await db.get(PurchaseQuote, UUID(stored["id"]))).amount_minor = 0
+    assert (await h.client.get("/admin/quotes/" + stored["id"], headers=h.headers)).json() == stored
+
+
+async def test_quote_eligibility_expiry_and_audit_atomicity(harness: Harness) -> None:
+    h = harness
+    ids, payloads, quote = await catalog_fixture(h)
+    for model, target in [(ProductPlan, ids[2]), (Product, ids[1]), (ProductCategory, ids[0])]:
+        async with h.security.factory() as db, db.begin():
+            (await db.get(model, UUID(target))).enabled = False
+        assert (
+            await h.client.post("/admin/quotes", headers=h.headers, json=quote)
+        ).status_code == 409
+        async with h.security.factory() as db, db.begin():
+            (await db.get(model, UUID(target))).enabled = True
+    for changes in [{"user_id": str(uuid4())}, {"plan_id": str(uuid4())}]:
+        assert (
+            await h.client.post("/admin/quotes", headers=h.headers, json=quote | changes)
+        ).status_code == 409
+    async with h.security.factory() as db, db.begin():
+        user = User(status="blocked")
+        db.add(user)
+        await db.flush()
+        blocked_id = str(user.id)
+    assert (
+        await h.client.post(
+            "/admin/quotes", headers=h.headers, json=quote | {"user_id": blocked_id}
+        )
+    ).status_code == 409
+    async with h.security.factory() as db, db.begin():
+        now = await db.scalar(select(func.clock_timestamp()))
+        expired = PurchaseQuote(
+            user_id=UUID(quote["user_id"]),
+            plan_id=UUID(ids[2]),
+            request_key=UUID(quote["request_key"]),
+            amount_minor=10100,
+            currency="IRT",
+            pricing_version=1,
+            snapshot={},
+            created_at=now - timedelta(days=1),
+            expires_at=now - timedelta(hours=1),
+        )
+        db.add(expired)
+        await db.flush()
+        expired_id = str(expired.id)
+    assert (await h.client.post("/admin/quotes", headers=h.headers, json=quote)).status_code == 409
+    assert (await h.client.get("/admin/quotes/" + expired_id, headers=h.headers)).json()["expired"]
+    fresh = quote | {"request_key": str(uuid4())}
+    async with h.security.factory() as db, db.begin():
+        await db.execute(
+            text(
+                "CREATE FUNCTION test_quote_audit_failure() RETURNS trigger LANGUAGE "
+                "plpgsql AS $$ BEGIN RAISE EXCEPTION 'test'; END; $$"
+            )
+        )
+        await db.execute(
+            text(
+                "CREATE TRIGGER test_quote_audit_failure BEFORE INSERT ON audit_logs "
+                "FOR EACH ROW EXECUTE FUNCTION test_quote_audit_failure()"
+            )
+        )
+    try:
+        assert (
+            await h.client.post("/admin/quotes", headers=h.headers, json=fresh)
+        ).status_code == 503
+        async with h.security.factory() as db:
+            assert (
+                await db.scalar(
+                    select(func.count())
+                    .select_from(PurchaseQuote)
+                    .where(PurchaseQuote.request_key == UUID(fresh["request_key"]))
+                )
+                == 0
+            )
+    finally:
+        async with h.security.factory() as db, db.begin():
+            await db.execute(text("DROP TRIGGER test_quote_audit_failure ON audit_logs"))
+            await db.execute(text("DROP FUNCTION test_quote_audit_failure()"))
+    assert (await h.client.post("/admin/quotes", headers=h.headers, json=fresh)).status_code == 200
+
+
+async def test_new_endpoint_role_matrix_and_restart_persistence(harness: Harness) -> None:
+    h = harness
+    ids, payloads, quote = await catalog_fixture(h)
+    stored = (await h.client.post("/admin/quotes", headers=h.headers, json=quote)).json()
+    for role, can_catalog_read, can_catalog_write, can_quote_read, can_quote_write in [
+        ("super_admin", True, True, True, True),
+        ("operations", True, True, True, True),
+        ("finance", False, False, True, False),
+        ("inventory", True, False, False, False),
+        ("support", False, False, True, False),
+        ("marketing", True, False, False, False),
+        ("auditor", True, False, True, False),
+    ]:
+        _, _, password, headers = await member(h, role)
+        for path in ["/admin/catalog/plans", "/admin/catalog/plans/" + ids[2]]:
+            assert (await h.client.get(path, headers=headers)).status_code == (
+                200 if can_catalog_read else 403
+            )
+        body = payloads[0] | dict(current_password=password, reason="security_response")
+        assert (
+            await h.client.post(
+                "/admin/catalog/categories",
+                headers=headers,
+                json=body | {"slug": "matrix-" + uuid4().hex},
+            )
+        ).status_code == (200 if can_catalog_write else 403)
+        assert (
+            await h.client.put("/admin/catalog/categories/" + ids[0], headers=headers, json=body)
+        ).status_code == (200 if can_catalog_write else 403)
+        assert (
+            await h.client.get("/admin/quotes/" + stored["id"], headers=headers)
+        ).status_code == (200 if can_quote_read else 403)
+        assert (await h.client.post("/admin/quotes", headers=headers, json=quote)).status_code == (
+            200 if can_quote_write else 403
+        )
+    app = create_app(Settings())
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(
+            transport=ASGITransport(app=app, client=(h.username, 1234)), base_url="http://localhost"
+        ) as client:
+            assert (
+                await client.post("/admin/quotes", headers=h.headers, json=quote)
+            ).json() == stored
+    for method, path, body in [
+        ("post", "/admin/catalog/categories", payloads[0] | step(h)),
+        ("put", "/admin/catalog/categories/" + ids[0], payloads[0] | step(h)),
+    ]:
+        assert (await h.client.request(method, path, json=body)).status_code == 401
+    assert (await h.client.get("/admin/quotes/" + stored["id"])).status_code == 401
+    with pytest.raises(DBAPIError):
+        async with h.security.factory() as db, db.begin():
+            (await db.get(ProductPlan, UUID(ids[2]))).randomization_method = "client"

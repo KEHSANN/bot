@@ -6,10 +6,10 @@
 
 ## Phase checklist
 
-- [x] 1. Runtime, configuration, health, logging, development setup, quality CI foundation (local checks passed; CI/Docker execution pending)
+- [x] 1. Runtime, configuration, health, logging, development setup, quality CI foundation (local checks and quality CI verified)
 - [x] 2. Database foundation and migrations (identity/RBAC/catalog; remaining domain schema is assigned to later phases)
 - [x] 3. Authenticated administrator APIs, enforced RBAC and append-only audit
-- [ ] 4. Catalog, pricing, stable quotes
+- [x] 4. Catalog management, pricing engine and persistent stable quotes
 - [ ] 5. Inventory and atomic import
 - [ ] 6. Wallet, immutable ledger, purchases and orders
 - [ ] 7. Manual deposits and verified gateway adapters
@@ -65,7 +65,7 @@ Next required phase: authentication, RBAC enforcement, safe administrator bootst
 
 ## Known limitations
 
-Not a functioning VPN sales system yet. No admin authentication, wallet/ledger, sales, provider, gateway, bot, frontend or production deployment is implemented. Only foundation migrations are implemented. Capacity is unknown. Credentials and sandbox documentation will be required for real provider/payment validation in later phases.
+Not a functioning VPN sales system yet. Authenticated administration, RBAC, audit and catalog/quotes are implemented; wallet/ledger, sales, provider, gateway, bot, frontend and production deployment are not. Three schema revisions are implemented. Capacity is unknown. Credentials and sandbox documentation will be required for real provider/payment validation in later phases.
 
 
 ## Phase 3: authenticated administration, enforced RBAC, immutable audit
@@ -83,3 +83,40 @@ Actual final local verification:
 - git diff whitespace check and focused security review completed. Positive mutations/token issuance require committed audit; database-owner/DBA, fabricated-insert, audit-outage and operator attribution limitations are explicit in docs/audit.md.
 
 Publication verified: `1b8d0262d4933c1320f3c225bb7f2635fd6c93cd`; remote branch matched. Both quality jobs completed successfully, including real PostgreSQL/Redis integration, migration lifecycle, scans, types, Compose configuration and Docker build: https://github.com/KEHSANN/bot/actions/runs/38398623320/job/115300168996 and https://github.com/KEHSANN/bot/actions/runs/38398615427/job/115300142294. Real network smoke confirmed readiness 200 and unauthenticated administrator access 401. Branch remains feature/platform-foundation. Next phase: catalog management, pricing engine and persistent idempotent quotes. No wallet/payment/provider/bot/UI/deployment/load-completion claim.
+
+
+## Phase 4: catalog management, integer pricing, persistent stable quotes
+
+Implemented app/catalog/{schemas,service,api}.py, app/models/quote.py, revision
+0003_catalog_quotes and current-password protected catalog create/read/update/disable.
+Quote creation/read use live orders/users permissions; prices cannot be supplied by clients.
+Per-user request keys, unique constraints and transactional locks persist one stable snapshot.
+Pricing edits bump the plan version without changing existing quotes. Seven-role allow/deny
+matrix, different-session concurrency and application-restart persistence are exercised.
+Runtime grants and PostgreSQL triggers keep quote updates/deletes/truncation unavailable.
+Detailed algorithm, guarantees, scope and DBA limitations are in docs/catalog-pricing.md.
+
+Actual final local checks:
+
+- Full suite: **148 passed, 0 failed, 0 skipped**, one upstream Starlette/httpx deprecation warning.
+- Coverage: **97.59% overall** with branch/greenlet/thread tracing; original 85% threshold retained.
+  All 128 existing tests retained; 20 catalog/pricing tests added.
+- Formatting, lint, strict mypy (35 files) passed. Real PostgreSQL 15.18/Redis 6.2.20.
+- Migration drift check, downgrade/base/re-upgrade/check and offline SQL generation passed.
+  Fresh-database tests verify the final migration, not just modified existing metadata.
+- Initial tests found a catalog-update server-timestamp refresh regression and an incorrect
+  step-up response expectation. Fixed application refresh/expected 403 denial and reran all tests.
+  An early unpublished migration constraint-naming omission was fixed with explicit op.f naming;
+  the final clean lifecycle and database method constraint test passed.
+- Secret scan: zero new findings. One reviewed public rejection-test literal added to the baseline;
+  no detectors disabled or live credentials introduced. Locked pip-audit: no known advisories.
+- Real uvicorn HTTP smoke: liveness/readiness 200 and unauthenticated catalog access 401.
+- Focused security review: no client amount override or mass assignment; permission/step-up and
+  audit rollback enforced; metadata excludes credentials/bodies; database/non-owner tamper tests
+  retained. Conservative shared write lock is deliberate, not a load-tested scalability claim.
+- Docker/Compose local execution remains unavailable; hosted CI will verify build/configuration.
+
+Publication and hosted CI verification are recorded only after observing the remote commit
+and completed checks. The platform is still not production-ready. Next incomplete phase:
+**5 — inventory management and atomic import**. Quotes do not reserve inventory, charge a wallet,
+consume a checkout attempt, provision VPNs or enforce order-history purchase limits.
