@@ -1,0 +1,1 @@
+EXPECTED_SCHEMA_REVISION = "0001_identity_catalog"

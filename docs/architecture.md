@@ -8,10 +8,14 @@ The remote repository `KEHSANN/bot` was empty on 2026-10-13: no files, branches,
 
 - Python 3.13 (supported version available in the execution environment), FastAPI, Pydantic v2 settings.
 - SQLAlchemy asyncpg PostgreSQL connection pool with pre-ping and bounded size; Redis async client.
-- `/health/live` checks process responsiveness. `/health/ready` performs concurrent, bounded real dependency probes and returns 503 when unavailable. It does not yet check migration version.
+- `/health/live` checks process responsiveness. `/health/ready` performs concurrent, bounded real dependency probes and returns 503 when unavailable. It requires the exact expected Alembic migration revision.
 - Lifespan-managed resources; exception-safe pool cleanup.
 - UUID request IDs, explicit host validation, response safety headers, generic Persian failure response, allowlisted JSON logging without request payloads or credentials.
 - uv lockfile, quality CI, local-development Compose, unprivileged API container.
+
+## Implemented database foundation
+
+Alembic revision `0001_identity_catalog` creates ten identity/RBAC/catalog tables. Shared explicit async transaction scope, strict IRT/toman conversion/display, migration-aware readiness and development-only disabled seeds are implemented. Normalized association keys, constrained user states, indexed catalog lookups, positive quotas/device limits and guarded price constraints are enforced by PostgreSQL. See `database.md` for exact scope and remaining financial schema work.
 
 ## Planned domain architecture (not yet implemented)
 

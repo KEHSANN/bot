@@ -5,6 +5,9 @@ RUN pip install --no-cache-dir uv==0.9.2
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 COPY app ./app
+COPY alembic.ini ./
+COPY migrations ./migrations
+COPY scripts ./scripts
 RUN useradd --system --uid 10001 app
 USER app
 EXPOSE 8000

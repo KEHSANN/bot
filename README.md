@@ -2,7 +2,7 @@
 
 A Persian-first VPN store under active implementation. **Not production-ready.**
 
-The repository started empty. The first implementation is a runnable FastAPI infrastructure foundation, not a completed sales bot. There are no working purchases, payment integrations, VPN provisioning, administrator accounts, or user interfaces yet.
+The repository started empty. The implementation includes a runnable FastAPI foundation plus versioned PostgreSQL identity/RBAC/catalog schema and strict IRT currency utilities, not a completed sales bot. There are no working purchases, payment integrations, VPN provisioning, administrator accounts, or user interfaces yet.
 
 ## Local development
 
@@ -24,6 +24,9 @@ uv sync --frozen
 export VPNSTORE_ENVIRONMENT=development
 export VPNSTORE_DATABASE_URL='postgresql+asyncpg://vpnstore:local-development-only@127.0.0.1/vpnstore'
 export VPNSTORE_REDIS_URL='redis://127.0.0.1:6379/0'
+uv run --frozen alembic upgrade head
+# Optional: disabled illustrative catalog, no accounts or live configurations:
+uv run --frozen python -m scripts.seed_dev
 uv run --frozen uvicorn app.main:create_app --factory --no-access-log
 ```
 
@@ -35,10 +38,14 @@ Settings use `VPNSTORE_`-prefixed environment variables; `.env` is not silently 
 cd backend
 uv run --frozen ruff format --check .
 uv run --frozen ruff check .
-uv run --frozen mypy app
+uv run --frozen mypy app scripts migrations
 uv run --frozen pytest -m 'not integration' --cov=app
-# Requires real PostgreSQL and Redis configured via the environment:
+# Use a dedicated disposable *_test database and environment=test.
+# Configure VPNSTORE_DATABASE_URL and VPNSTORE_REDIS_URL for those services.
+uv run --frozen alembic upgrade head
+uv run --frozen alembic check
 uv run --frozen pytest -m integration
+uv run --frozen python scripts/check_secrets.py
 uv run --frozen pip-audit
 ```
 

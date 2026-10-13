@@ -26,6 +26,17 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+  migrate:
+    build: ./backend
+    environment:
+      VPNSTORE_ENVIRONMENT: development
+      VPNSTORE_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      VPNSTORE_REDIS_URL: redis://redis:6379/0
+      VPNSTORE_ALLOWED_HOSTS: '["localhost","127.0.0.1","api"]'
+    command: ["/opt/venv/bin/alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
   api:
     build: ./backend
     environment:
@@ -36,6 +47,8 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:

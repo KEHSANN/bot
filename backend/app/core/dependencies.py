@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.core.config import Settings
+from app.db.schema import EXPECTED_SCHEMA_REVISION
 
 
 class Dependencies:
@@ -28,7 +29,9 @@ class Dependencies:
 
     async def database_ping(self) -> None:
         async with self.engine.connect() as connection:
-            await connection.execute(text("SELECT 1"))
+            revision = await connection.scalar(text("SELECT version_num FROM alembic_version"))
+            if revision != EXPECTED_SCHEMA_REVISION:
+                raise RuntimeError("Database migration revision mismatch")
 
     async def redis_ping(self) -> None:
         await cast(Awaitable[bool], self.redis.ping())

@@ -16,7 +16,7 @@ jobs:
         env:
           POSTGRES_USER: vpnstore
           POSTGRES_PASSWORD: ci-only-password
-          POSTGRES_DB: vpnstore
+          POSTGRES_DB: vpnstore_test
         ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U vpnstore -d vpnstore"
@@ -32,7 +32,7 @@ jobs:
         working-directory: backend
     env:
       VPNSTORE_ENVIRONMENT: test
-      VPNSTORE_DATABASE_URL: postgresql+asyncpg://vpnstore:ci-only-password@127.0.0.1/vpnstore
+      VPNSTORE_DATABASE_URL: postgresql+asyncpg://vpnstore:ci-only-password@127.0.0.1/vpnstore_test
       VPNSTORE_REDIS_URL: redis://127.0.0.1:6379/15
     steps:
       - uses: actions/checkout@v4
@@ -46,10 +46,21 @@ jobs:
       - name: Lint
         run: uv run --frozen ruff check .
       - name: Type check
-        run: uv run --frozen mypy app
+        run: uv run --frozen mypy app scripts migrations
+      - name: Migration lifecycle (disposable CI database only)
+        run: |
+          uv run --frozen alembic upgrade head
+          uv run --frozen alembic check
+          uv run --frozen alembic downgrade base
+          uv run --frozen alembic upgrade head
+          uv run --frozen alembic check
       - name: Unit and real-service integration tests
         run: uv run --frozen pytest --cov=app --cov-report=term-missing --cov-report=xml
+      - name: Secret scan against reviewed placeholder baseline
+        run: uv run --frozen python scripts/check_secrets.py
       - name: Dependency audit
         run: uv run --frozen pip-audit
+      - name: Validate development Compose configuration
+        run: cd .. && docker compose --env-file .env.example config --quiet
       - name: Build container
         run: docker build -t vpnstore-api:ci .
