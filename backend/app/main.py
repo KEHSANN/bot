@@ -5,12 +5,19 @@ from contextlib import asynccontextmanager
 from uuid import UUID, uuid4
 
 from fastapi import FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.types import Scope
 
+from app.core.body_limit import BodyLimitMiddleware
 from app.core.config import Settings
 from app.core.dependencies import Dependencies
 from app.core.logging import configure_logging
+from app.db.session import session_factory
+from app.security.api import admin, auth
+from app.security.metadata import request_metadata as security_metadata
+from app.security.service import SecurityError, SecurityService
 
 logger = logging.getLogger("vpnstore.http")
 
@@ -22,6 +29,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         configure_logging()
         app.state.dependencies = Dependencies(config)
+        app.state.security = SecurityService(
+            session_factory(app.state.dependencies.engine), app.state.dependencies.redis, config
+        )
         try:
             yield
         finally:
@@ -36,6 +46,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url=None,
         openapi_url="/openapi.json" if development else None,
     )
+    app.include_router(auth)
+    app.include_router(admin)
+
+    async def rejected_transport(scope: Scope, status: int) -> int:
+        request = Request(scope)
+        audit_status = await app.state.security.record_invalid(
+            security_metadata(request), "security.transport_rejected"
+        )
+        return audit_status if audit_status in {429, 503} else status
+
+    app.add_middleware(BodyLimitMiddleware, on_rejected=rejected_transport)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=config.allowed_hosts)
 
     @app.middleware("http")
@@ -80,6 +101,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
         )
         return response
+
+    @app.exception_handler(SecurityError)
+    async def security_error(request: Request, exc: SecurityError) -> JSONResponse:
+        messages = {
+            401: "اطلاعات ورود یا نشست معتبر نیست.",
+            403: "دسترسی مجاز نیست.",
+            404: "مورد یافت نشد.",
+            409: "عملیات با وضعیت فعلی سازگار نیست.",
+            422: "اطلاعات درخواست معتبر نیست.",
+            429: "تعداد درخواست‌ها زیاد است؛ بعداً تلاش کنید.",
+            503: "سرویس موقتاً در دسترس نیست.",
+        }
+        headers = {"WWW-Authenticate": "Bearer"} if exc.status == 401 else {}
+        if exc.status == 429:
+            headers["Retry-After"] = str(config.login_window_seconds)
+        return JSONResponse(
+            {"detail": messages[exc.status]}, status_code=exc.status, headers=headers
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_input(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # Default FastAPI validation responses can echo plaintext secret field inputs.
+        status = await request.app.state.security.record_invalid(
+            security_metadata(request), "security.invalid_request"
+        )
+        return JSONResponse({"detail": "اطلاعات درخواست معتبر نیست."}, status_code=status)
 
     @app.get("/health/live", include_in_schema=False)
     async def live() -> dict[str, str]:

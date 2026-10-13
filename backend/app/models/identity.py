@@ -36,12 +36,26 @@ class AdminUser(IdentityMixin, Base):
     __tablename__ = "admin_users"
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), unique=True)
     enabled: Mapped[bool] = mapped_column(Boolean, server_default="false")
-    # No password or auth/session bypass: credentials are added by the authentication phase.
+    __table_args__ = (
+        CheckConstraint(
+            "username IS NULL OR username ~ '^[a-z][a-z0-9_.-]{2,63}$'", name="valid_username"
+        ),
+        CheckConstraint(
+            "NOT enabled OR (username IS NOT NULL AND password_hash IS NOT NULL)",
+            name="enabled_credentials",
+        ),
+        CheckConstraint(
+            "password_hash IS NULL OR password_hash LIKE '$argon2id$%'", name="argon2id_hash"
+        ),
+    )
+    username: Mapped[str | None] = mapped_column(String(64), unique=True)
+    password_hash: Mapped[str | None] = mapped_column(String(512))
 
 
 class Role(IdentityMixin, Base):
     __tablename__ = "roles"
     __table_args__ = (CheckConstraint("length(code) > 0", name="nonempty_code"),)
+    is_system: Mapped[bool] = mapped_column(Boolean, server_default="false")
     code: Mapped[str] = mapped_column(String(64), unique=True)
     title: Mapped[str] = mapped_column(String(128))
 

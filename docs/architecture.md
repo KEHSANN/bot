@@ -34,3 +34,7 @@ No sales/admin APIs exist yet. Credentials come from environment; hosted setting
 ## Scale
 
 The 100,000-DAU goal remains an unverified target. No capacity/load benchmark has been run. Pool budgets, Redis queues, callback idempotency, rate limits, multi-process behavior, and recovery must be evaluated in later phases.
+
+## Phase 3 security architecture
+
+SecurityService centralizes authentication, live permissions and audited administration; HTTP adapters are thin. Session/token state and audit are authoritative in PostgreSQL; Redis only counts attempts. Opaque token verification needs no signing-key provisioning and makes revocation immediate. Password hashing is bounded and offloaded to threads. Audit details are built from closed policy/state metadata rather than arbitrary payloads. Non-owner runtime grants and append-only triggers defend DML/DDL separately, within the DBA limitations documented in audit.md.

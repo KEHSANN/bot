@@ -1,17 +1,19 @@
-# Security status
+# Security engineering status
 
-Implemented: secret-typed settings (redacted repr), fail-closed hosted dependency configuration, TLS requirements for hosted PostgreSQL/Redis, explicit host allowlist, unprivileged container process, generic error responses, UUID-only request correlation, no query/body/header logging, disabled hosted API docs, no default administrator.
+## Threat model and trust boundaries
 
-The dependency audit is a real advisory scan, not a complete security assessment. No credentials from Telegram, gateways, or providers are required for this phase; none are present in committed configuration. The example credentials are local-development placeholders only. Production must use unique secrets managed outside Git.
+Untrusted HTTP clients may guess credentials, steal/replay tokens, spoof forwarding headers, submit malformed/oversized bodies, seek unauthorized data/role escalation, or try to hide administrative changes. PostgreSQL/Redis, migration/host operators and application code are trusted infrastructure; compromises of those boundaries are not solved by API RBAC.
 
-Remaining blockers before exposure: authentication/session lifecycle, RBAC, CSRF/CORS policy, rate limiting, encryption for provider/configuration secrets, financial invariants, payment verification, Telegram webhook validation, upload protection, audit immutability, penetration tests, proxy policy, backup/recovery tests. Public health readiness may disclose availability; restrict it at the deployment ingress if needed.
+## Implemented controls
 
-Do not disable protections or use the development Compose topology in production. Hosted TLS termination and certificate validation must be configured and verified against the chosen services.
+Argon2id passwords, short opaque access tokens, digest-only rotating refresh tokens, absolute expiry, revocation, fail-closed shared Redis counters, bounded body reads, safe validation, live server-side RBAC, current-password mutation confirmation, subset delegation and self/system-role/last-super guards. Operator bootstrap/recovery uses masked prompts, no defaults or public reset route. Successful state changes and audit commit together. PostgreSQL triggers reject audit UPDATE/DELETE/TRUNCATE; non-owner runtime grants exclude audit mutation/DDL. Exact guarantees and outage/DBA limitations: authentication.md and audit.md.
 
-## Foundation scan results
+Read serializers/audit details contain no password hashes, token values/digests or arbitrary request payloads. Logging serializes only allowlisted metadata. Hosted connection settings fail closed without authenticated TLS dependencies/explicit hosts; production API docs are disabled. HTTPS ingress and strict proxy trust are deployment responsibilities. No auth cookies/CORS credentials/browser storage exists yet; future browser cookies need CSRF protection.
 
-Locked environment dependency audit found no known advisories at execution time. GitHub Advanced Security content scan could not run because it is not enabled. A local detect-secrets 1.5.0 default-detector scan reviewed ten placeholder/test findings; no live production credentials were introduced. Dependency lockfile hashes were excluded; no potential secrets were sent for online validation. Detailed verification status is in the progress log.
+## Security review and scans
 
-A locked detect-secrets scanner now runs in CI against a reviewed placeholder baseline; new findings fail closed. It never sends potential credentials for online verification and never prints their values. This is independent of unavailable GitHub Advanced Security. The baseline's ten explicitly non-secret fixture/example findings must not be expanded without reviewing their source lines. Database integration tests refuse non-test environments and database names without a _test suffix.
+Verified central policy enforcement on all implemented admin operations; no client/token role claims; UUID targeting/strict schemas; constant dummy hash path for unknown users; row-locked session rotation/revocation; audit failure rollback; raw forwarding headers ignored; non-owner/owner audit tampering and restrictive replay-outage fallback tested. pip-audit found no known advisories in the locked environment. Locked detect-secrets runs in CI against reviewed non-secret fixture/example fingerprints; no default detector disabled. GitHub Advanced Security remains unavailable. See implementation-progress.md for actual results.
 
-Authentication, RBAC enforcement, safe admin bootstrap and immutable audit are not implemented merely because their foundation tables exist. No admin endpoint, enabled default administrator or password is exposed.
+## Remaining risks
+
+Not a security certification or production-ready sales system. MFA, browser/BFF session/CSRF design, Telegram identity binding, external WORM/cryptographic audit, retention/archival/monitoring, penetration testing, hosted deployment/TLS verification, financial invariants, payment/provider verification, upload handling, backup/restore and load/capacity testing remain incomplete. Fixed windows and per-process hash bounds are not a complete DDoS defense. Owner/DBA privileges can defeat triggers; compromised DB credentials can fabricate events/direct changes. Keep migration ownership separate and protect operator credentials. Never use the development Compose credentials/topology in production.

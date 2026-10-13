@@ -1,1 +1,1 @@
-EXPECTED_SCHEMA_REVISION = "0001_identity_catalog"
+EXPECTED_SCHEMA_REVISION = "0002_admin_security"

@@ -18,11 +18,21 @@ class Settings(BaseSettings):
     )
     dependency_timeout_seconds: float = Field(default=2.0, gt=0, le=10)
     database_pool_size: int = Field(default=10, ge=1, le=100)
+    access_token_seconds: int = Field(default=300, ge=60, le=900)
+    refresh_token_seconds: int = Field(default=86400, ge=600, le=604800)
+    session_seconds: int = Field(default=604800, ge=600, le=604800)
+    login_ip_limit: int = Field(default=20, ge=1, le=100)
+    login_account_limit: int = Field(default=5, ge=1, le=20)
+    login_window_seconds: int = Field(default=300, ge=60, le=3600)
+    admin_ip_limit: int = Field(default=120, ge=1, le=1000)
     database_max_overflow: int = Field(default=10, ge=0, le=100)
 
     @model_validator(mode="after")
     def validate_connections(self) -> "Settings":
         from urllib.parse import urlsplit
+
+        if self.refresh_token_seconds > self.session_seconds:
+            raise ValueError("Refresh lifetime cannot exceed the session lifetime")
 
         database = make_url(self.database_url.get_secret_value())
         redis = urlsplit(self.redis_url.get_secret_value())

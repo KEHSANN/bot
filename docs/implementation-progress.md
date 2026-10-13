@@ -8,7 +8,7 @@
 
 - [x] 1. Runtime, configuration, health, logging, development setup, quality CI foundation (local checks passed; CI/Docker execution pending)
 - [x] 2. Database foundation and migrations (identity/RBAC/catalog; remaining domain schema is assigned to later phases)
-- [ ] 3. Authentication, RBAC, audit
+- [x] 3. Authenticated administrator APIs, enforced RBAC and append-only audit
 - [ ] 4. Catalog, pricing, stable quotes
 - [ ] 5. Inventory and atomic import
 - [ ] 6. Wallet, immutable ledger, purchases and orders
@@ -66,3 +66,20 @@ Next required phase: authentication, RBAC enforcement, safe administrator bootst
 ## Known limitations
 
 Not a functioning VPN sales system yet. No admin authentication, wallet/ledger, sales, provider, gateway, bot, frontend or production deployment is implemented. Only foundation migrations are implemented. Capacity is unknown. Credentials and sandbox documentation will be required for real provider/payment validation in later phases.
+
+
+## Phase 3: authenticated administration, enforced RBAC, immutable audit
+
+Implemented app/security/{crypto,schemas,policy,metadata,service,api}.py, app/models/security.py, admin credential/system-role columns, revision 0002_admin_security, core/body_limit.py, operator bootstrap/recovery CLI and deploy/runtime-role.sql. Thin protected HTTP routes invoke live centralized service authorization. No default administrator/password or public recovery bypass was created.
+
+Actual final local verification:
+
+- Full existing + security suite: **128 passed, 0 failed, 0 skipped**, one upstream Starlette/httpx deprecation warning.
+- Coverage: **98.14% overall**, security/service.py 96% as displayed by the branch report; 85% threshold retained. SQLAlchemy greenlet and Argon2 thread tracing configured correctly. Early under-reporting was corrected rather than excluding code/lowering the threshold.
+- Formatting, lint, strict mypy (29 files): passed. Early generated-code type/lint issues and a test import were fixed before publication.
+- Real PostgreSQL 15.18/Redis 6.2.20: access/refresh/session expiry; digest storage; generic login errors; account/IP rate limits; refresh race/reuse; logout/password/session revocation; live grants; allowed/denied role matrices; privilege escalation/self/system-role/last-super protection; account states; current-password step-up; operator recovery; validation/body limits; audit redaction, DML/ORM/TRUNCATE rejection and non-owner DDL denial; audit failure rollback and restrictive replay fallback.
+- Migration check, disposable downgrade/base/re-upgrade/check and offline SQL generation passed. Destructive downgrade is not a production rollback recommendation.
+- Locked pip-audit: no known advisories. Default-detector secret scan: zero new findings. Exactly five reviewed test-only findings (random fixture/public name expressions and intentionally wrong passwords) added to the existing ten-placeholder baseline; no detector disabled and no live secret introduced.
+- git diff whitespace check and focused security review completed. Positive mutations/token issuance require committed audit; database-owner/DBA, fabricated-insert, audit-outage and operator attribution limitations are explicit in docs/audit.md.
+
+Publication/CI: implementation commit and completed GitHub checks will be recorded after remote verification. Branch remains feature/platform-foundation. Next phase: catalog management, pricing engine and persistent idempotent quotes. No wallet/payment/provider/bot/UI/deployment/load-completion claim.

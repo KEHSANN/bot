@@ -41,3 +41,7 @@ Migration downgrade/upgrade was tested on a disposable PostgreSQL database. **Do
 ## Remaining database work
 
 Wallet/immutable ledger, financial transactions, inventory, orders/quotes, payments, provider/provisioning/outbox, referrals, sessions/audit, workflows, campaigns/coupons/support and reporting schemas are not implemented. No mutable placeholder wallet or SQLite substitute is shipped. Financial concurrency and audit immutability remain blockers before enabling sales.
+
+## Revision 0002_admin_security
+
+Adds optional unique validated username and Argon2id hash to existing disabled admin rows, an enabled-requires-credentials constraint, system-role designation, admin_sessions, digest-only admin_tokens, audit_logs and a typed admin_login_enabled setting. Seeds seven explicit roles/27 granular permissions, creates append-only audit triggers, records policy initialization, and does not create/enable a default admin. Existing enabled rows without credentials require trusted backfill/disable before upgrading; no insecure credential is invented. The downgrade removes security tables/credential columns and destroys audit history; only tested on disposable databases. Deploy a separate non-owner runtime group after migrating.
