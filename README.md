@@ -1,7 +1,24 @@
-# فروشگاه VPN تلگرام / Telegram VPN Store
+# پلتفرم جامع فروش VPN تلگرام (Production-Grade Telegram VPN Store)
 
-Repository initialized for the accepted Telegram VPN store project.
+این پروژه یک پلتفرم کامل، مقیاس‌پذیر و امن برای فروش اشتراک‌ها و کانفیگ‌های VPN از طریق ربات تلگرام به همراه **دو پنل مدیریت هم‌تراز** (پنل وب RTL فارسی با Next.js و پنل مدیریت کامل داخل تلگرام) است.
 
-Implementation will be published on `feature/platform-foundation` and reviewed before merging. The complete requirements, runnable code, tests, and progress report belong to that branch.
+## ویژگی‌های کلیدی پیاده‌سازی‌شده
 
-**This repository is not yet a production-ready VPN sales system. No payment, VPN provisioning, or capacity claim is made.**
+- **یکپارچگی مالی و واحد پولی پایه (IRT)**: ذخیره تمامی مبالغ به صورت عدد صحیح ۶۴ بیتی بر حسب تومان (`1 IRT = 10 IRR`)، دفتر کل دوطرفه تغییرناپذیر (`ledger_transactions` و `ledger_entries`) و جلوگیری از موجودی منفی در تراکنش‌های هم‌زمان.
+- **موتور قیمت‌گذاری تصادفی و پیش‌فاکتور پایدار (`PriceQuote`)**: افزودن گام تصادفی قابل تنظیم (`min_random_increment_irt` تا `max_random_increment_irt`) و حفظ پیش‌فاکتور در دیتابیس تا زمان انقضا جهت جلوگیری از تغییر قیمت در تلاش‌های مجدد.
+- **مدیریت موجودی و درون‌ریزی دسته‌ای اتمیک (Atomic Bulk Import)**: پشتیبانی از جداکننده‌های مختلف، هش SHA-256 برای تشخیص موارد تکراری در فایل و دیتابیس، پیش‌نمایش خط‌به‌خط و ثبت اتمیک یا جزئی به همراه رمزنگاری کانفیگ‌ها (`enc_v1`).
+- **تامین خودکار اشتراک (Automated VPN Provisioning) و بازیابی خطا**: آداپتور استاندارد سرویس‌دهنده با کلید یکتای `idempotency_key`، تطبیق وضعیت در صورت Timeout مبهم (`ambiguous_reconcile`) و بازگشت وجه خودکار (Compensating Refund) در صورت خطای قطعی.
+- **سیستم دعوت و پاداش چهارگانه (`N`, `W`, `P`, `M/K`)**:
+  - پاداش معرف استاندارد (`N`)
+  - پاداش خوش‌آمدگویی کاربر جدید (`W`)
+  - پاداش اولین پرداخت تاییدشده (`P`)
+  - پاداش حدنصاب (`M` دعوت واجد شرایط با جایزه `K` تومان) نیازمند بررسی و تایید مدیر با ثبت دلیل و لاگ ممیزی.
+- **بررسی عضویت اجباری در کانال‌ها با کش ۲۴ ساعته (`membership_cache`)** و سیاست Fail-Closed در صورت خطای API تلگرام.
+- **کنترل دسترسی مبتنی بر نقش (RBAC)**، محافظت از آخرین مدیر ارشد (`super_admin`) و ثبت لاگ‌های ممیزی بدون افشای اطلاعات محرمانه.
+
+## دستورات اجرای تست‌ها و بنچمارک بار
+
+```bash
+PYTHONPATH=. python3 backend/tests/test_full_platform.py
+PYTHONPATH=. python3 scripts/load_test_benchmark.py
+```
