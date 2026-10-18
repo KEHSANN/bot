@@ -1,0 +1,310 @@
+"""Bulk import of unique configuration/subscription pairs.
+
+Input format (one record per line, blank lines and ``#`` comments ignored):
+
+    <config>|<subscription_url>
+    <config> <TAB> <subscription_url>
+    <config>|<subscription_url>|<optional_label>     # label is ignored
+
+CSV files with a header row ``config,sub_url`` (or Persian aliases
+``config,subscription``) are also accepted; comma separated values without a
+header are treated as two columns.
+
+Two import modes:
+
+* ``SKIP_INVALID`` — valid, previously unseen pairs are imported. Every invalid
+  or duplicate record is reported and skipped. Never silent.
+* ``ALL_OR_NOTHING`` — if any record is invalid or duplicated (within the batch
+  or already in the database) nothing is imported.
+
+Deduplication uses keyed HMAC fingerprints of the *normalised* config and, when
+present, of the subscription URL. Re-importing the same batch is a no-op.
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+import uuid
+from dataclasses import dataclass, field
+from enum import Enum
+
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from vpnbot.db.enums import InventoryStatus, ProductType
+from vpnbot.db.models.catalog import Plan, Product
+from vpnbot.db.models.inventory import InventoryItem
+from vpnbot.security.crypto import CredentialCipher, fingerprint
+
+
+class ImportMode(str, Enum):
+    SKIP_INVALID = "SKIP_INVALID"
+    ALL_OR_NOTHING = "ALL_OR_NOTHING"
+
+
+class ImportError(ValueError):
+    pass
+
+
+@dataclass
+class ParsedRecord:
+    line_no: int
+    config: str
+    sub_url: str | None
+    error: str | None = None
+
+
+@dataclass
+class Preview:
+    mode: ImportMode
+    total: int = 0
+    valid: int = 0
+    invalid: int = 0
+    duplicates_in_batch: int = 0
+    duplicates_in_database: int = 0
+    to_import: int = 0
+    skipped: int = 0
+    errors: list[tuple[int, str]] = field(default_factory=list)
+    records: list[ParsedRecord] = field(default_factory=list)
+    batch_id: str = ""
+
+    @property
+    def can_confirm(self) -> bool:
+        if self.mode is ImportMode.ALL_OR_NOTHING:
+            return (
+                self.invalid == 0
+                and self.duplicates_in_batch == 0
+                and self.duplicates_in_database == 0
+                and self.to_import > 0
+            )
+        return self.to_import > 0
+
+
+@dataclass
+class ImportResult:
+    imported: int
+    skipped_invalid: int
+    skipped_duplicate_batch: int
+    skipped_duplicate_db: int
+    batch_id: str
+    available_after: int
+
+
+_SEPARATORS = ["|", "\t"]
+_CSV_HEADERS = {
+    "config": {"config", "configuration", "کانفیگ", "conf"},
+    "sub_url": {"sub_url", "suburl", "subscription", "url", "لینک", "ساب"},
+}
+
+
+def parse_records(raw: str, *, allow_config_only: bool = False) -> list[ParsedRecord]:
+    records: list[ParsedRecord] = []
+    lines = raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+
+    # CSV with header detection
+    stripped = [line for line in lines if line.strip() and not line.lstrip().startswith("#")]
+    if stripped and "," in stripped[0] and _looks_like_csv_header(stripped[0]):
+        reader = csv.reader(io.StringIO("\n".join(stripped)))
+        rows = list(reader)
+        header = [h.strip().lower() for h in rows[0]]
+        idx_config = _find_header(header, "config")
+        idx_sub = _find_header(header, "sub_url")
+        for offset, row in enumerate(rows[1:], start=2):
+            if not row or not any(cell.strip() for cell in row):
+                continue
+            config = row[idx_config].strip() if idx_config is not None and idx_config < len(row) else ""
+            sub = row[idx_sub].strip() if idx_sub is not None and idx_sub < len(row) else ""
+            records.append(_record(offset, config, sub, allow_config_only))
+        return records
+
+    for line_no, line in enumerate(lines, start=1):
+        text = line.strip()
+        if not text or text.startswith("#"):
+            continue
+        config, sub = _split_line(text)
+        records.append(_record(line_no, config, sub, allow_config_only))
+    return records
+
+
+def _looks_like_csv_header(line: str) -> bool:
+    cells = [c.strip().lower() for c in line.split(",")]
+    known = set().union(*_CSV_HEADERS.values())
+    return all(cell in known for cell in cells if cell) and any(cell in known for cell in cells)
+
+
+def _find_header(header: list[str], kind: str) -> int | None:
+    aliases = _CSV_HEADERS[kind]
+    for index, cell in enumerate(header):
+        if cell in aliases:
+            return index
+    return None
+
+
+def _split_line(text: str) -> tuple[str, str]:
+    for sep in _SEPARATORS:
+        if sep in text:
+            config, _, rest = text.partition(sep)
+            sub = rest.split(sep, 1)[0].strip()
+            return config.strip(), sub
+    # fall back to comma only when it splits into exactly two non-empty cells
+    if text.count(",") == 1:
+        left, right = text.split(",", 1)
+        return left.strip(), right.strip()
+    return text.strip(), ""
+
+
+def _record(line_no: int, config: str, sub: str, allow_config_only: bool) -> ParsedRecord:
+    if not config:
+        return ParsedRecord(line_no, config, sub or None, error="مقدار کانفیگ خالی است")
+    if not sub and not allow_config_only:
+        return ParsedRecord(line_no, config, None, error="لینک اشتراک (sub_url) وجود ندارد")
+    if sub and not sub.lower().startswith(("http://", "https://")):
+        return ParsedRecord(line_no, config, sub, error="لینک اشتراک باید با http یا https شروع شود")
+    return ParsedRecord(line_no, config, sub or None)
+
+
+async def build_preview(
+    session: AsyncSession,
+    *,
+    product: Product,
+    raw: str,
+    mode: ImportMode,
+    secret: str,
+    max_records: int = 20_000,
+    label_filter: str | None = None,
+) -> Preview:
+    allow_config_only = product.product_type in (ProductType.CONFIG, ProductType.COMBO) or label_filter == "config_only"
+    records = parse_records(raw, allow_config_only=allow_config_only)
+    if not records:
+        raise ImportError("هیچ رکوردی در ورودی یافت نشد")
+    if len(records) > max_records:
+        raise ImportError(f"حداکثر {max_records} رکورد در هر import مجاز است")
+
+    preview = Preview(mode=mode, total=len(records), batch_id=uuid.uuid4().hex[:16])
+    seen_config: set[str] = set()
+    seen_sub: set[str] = set()
+    candidates: list[ParsedRecord] = []
+
+    for record in records:
+        if record.error:
+            preview.invalid += 1
+            preview.errors.append((record.line_no, record.error))
+            continue
+        fp_config = fingerprint(record.config, secret)
+        fp_sub = fingerprint(record.sub_url, secret) if record.sub_url else None
+        if fp_config in seen_config or (fp_sub and fp_sub in seen_sub):
+            preview.duplicates_in_batch += 1
+            preview.errors.append((record.line_no, "تکراری در همین فایل"))
+            continue
+        seen_config.add(fp_config)
+        if fp_sub:
+            seen_sub.add(fp_sub)
+        preview.valid += 1
+        candidates.append(record)
+
+    # Database duplicates
+    if candidates:
+        config_fps = [fingerprint(r.config, secret) for r in candidates]
+        existing = set(
+            (
+                await session.execute(
+                    select(InventoryItem.config_fingerprint).where(
+                        InventoryItem.config_fingerprint.in_(config_fps)
+                    )
+                )
+            ).scalars()
+        )
+        sub_fps = [fingerprint(r.sub_url, secret) for r in candidates if r.sub_url]
+        existing_subs = set(
+            (
+                await session.execute(
+                    select(InventoryItem.sub_url_fingerprint).where(
+                        InventoryItem.sub_url_fingerprint.in_(sub_fps)
+                    )
+                )
+            ).scalars()
+        )
+        fresh: list[ParsedRecord] = []
+        for record in candidates:
+            fp_config = fingerprint(record.config, secret)
+            fp_sub = fingerprint(record.sub_url, secret) if record.sub_url else None
+            if fp_config in existing or (fp_sub and fp_sub in existing_subs):
+                preview.duplicates_in_database += 1
+                preview.errors.append((record.line_no, "قبلاً در انبار ثبت شده است"))
+                continue
+            fresh.append(record)
+        preview.records = fresh
+    preview.to_import = len(preview.records)
+    preview.skipped = preview.total - preview.to_import
+    preview.errors.sort(key=lambda item: item[0])
+    return preview
+
+
+async def apply_import(
+    session: AsyncSession,
+    *,
+    cipher: CredentialCipher,
+    secret: str,
+    product: Product,
+    preview: Preview,
+    plan_id: int | None,
+    actor_admin_id: int,
+) -> ImportResult:
+    """Persist a confirmed preview. Caller owns the transaction."""
+    if preview.mode is ImportMode.ALL_OR_NOTHING and not preview.can_confirm:
+        raise ImportError("به دلیل وجود رکورد نامعتبر تکراری، import همه‌یا‌هیچ انجام نشد")
+    if preview.to_import == 0:
+        raise ImportError("رکورد معتبری برای درج وجود ندارد")
+    if plan_id is not None:
+        plan = await session.get(Plan, plan_id)
+        if plan is None or plan.product_id != product.id:
+            raise ImportError("پلن انتخابی متعلق به این محصول نیست")
+
+    rows = []
+    for record in preview.records:
+        rows.append(
+            {
+                "product_id": product.id,
+                "plan_id": plan_id,
+                "config_cipher": cipher.encrypt(record.config),
+                "config_fingerprint": fingerprint(record.config, secret),
+                "sub_url_cipher": cipher.encrypt(record.sub_url) if record.sub_url else None,
+                "sub_url_fingerprint": fingerprint(record.sub_url, secret) if record.sub_url else None,
+                "status": InventoryStatus.AVAILABLE.value,
+                "source_batch_id": preview.batch_id,
+            }
+        )
+
+    stmt = (
+        pg_insert(InventoryItem)
+        .values(rows)
+        .on_conflict_do_nothing(index_elements=["config_fingerprint"])
+        .returning(InventoryItem.id)
+    )
+    inserted = len((await session.execute(stmt)).all())
+    await session.flush()
+
+    available_after = int(
+        (
+            await session.execute(
+                select(InventoryItem.id)
+                .where(
+                    InventoryItem.product_id == product.id,
+                    InventoryItem.status == InventoryStatus.AVAILABLE,
+                )
+                .with_only_columns(InventoryItem.id)
+            )
+        )
+        .all()
+        .__len__()
+    )
+    return ImportResult(
+        imported=inserted,
+        skipped_invalid=preview.invalid,
+        skipped_duplicate_batch=preview.duplicates_in_batch,
+        skipped_duplicate_db=preview.duplicates_in_database + max(0, preview.to_import - inserted),
+        batch_id=preview.batch_id,
+        available_after=available_after,
+    )

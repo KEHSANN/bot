@@ -1,0 +1,88 @@
+name: vpnbot
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vpnbot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-vpnbot}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Not published: only the compose network reaches PostgreSQL.
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # FSM state only; losing it on restart costs an in-progress wizard, nothing else.
+
+  migrate:
+    build: .
+    image: vpnbot:latest
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-vpnbot}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-vpnbot}
+    command: ["vpnbot", "migrate"]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  bot:
+    build: .
+    image: vpnbot:latest
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-vpnbot}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-vpnbot}
+      REDIS_URL: redis://redis:6379/0
+      HEALTH_HOST: 0.0.0.0
+      HEALTH_PORT: 8081
+    command: ["vpnbot", "run"]
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    ports:
+      # Probe endpoint only, loopback-bound. Nothing else is exposed.
+      - "127.0.0.1:8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8081/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  worker:
+    build: .
+    image: vpnbot:latest
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-vpnbot}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-vpnbot}
+      REDIS_URL: redis://redis:6379/0
+    command: ["vpnbot", "worker"]
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # The worker has no HTTP surface; process liveness is enough here.
+      disable: true
+
+volumes:
+  pgdata:
