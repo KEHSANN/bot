@@ -542,3 +542,133 @@ async def test_wallet_purchase_insufficient_balance(session) -> None:
     assert order.status is OrderStatus.PENDING_PAYMENT
     assert await wallet_service.balance(session, user.id) == 100_000
 
+
+async def test_block_user_wipes_receipts_and_cancels_pending(session) -> None:
+    """Blocking: status flips, ALL receipts are wiped (pending + approved),
+    pending payments/top-ups are cancelled, approved history stays intact,
+    and unblocking restores access but never the receipts."""
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import PaymentMethod, PaymentStatus, UserStatus
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services import topups as topup_service
+    from vpnbot.services import user_admin as user_admin_service
+    from vpnbot.services.auth import bootstrap_owner
+    from vpnbot.services.settings import CARD_SETTINGS, SettingsService
+
+    admin = await bootstrap_owner(session, telegram_id=900000411)
+    user = await make_user(session, telegram_id=900000412)
+    await SettingsService(session).set(
+        CARD_SETTINGS,
+        {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
+    )
+    _, product, plan = await make_catalog(session)
+    from vpnbot.db.enums import InventoryStatus
+    from vpnbot.db.models.inventory import InventoryItem
+
+    for i in range(3):
+        session.add(
+            InventoryItem(
+                product_id=product.id, plan_id=plan.id, config_cipher="c",
+                config_fingerprint=f"fp-blk-{i}", status=InventoryStatus.AVAILABLE,
+            )
+        )
+    await session.flush()
+
+    async def _paid_order(*, approve: bool):
+        order = await order_service.create_order(
+            session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+        )
+        payment = await payment_service.start_payment(session, order=order, method=PaymentMethod.CARD)
+        await payment_service.submit_card_receipt(
+            session, payment_id=payment.id, user_id=user.id, file_id="rcpt", file_type="photo"
+        )
+        if approve:
+            await payment_service.approve_payment(session, payment_id=payment.id, admin_id=admin.id)
+        return order, payment
+
+    _o1, pending_payment = await _paid_order(approve=False)
+    _o2, approved_payment = await _paid_order(approve=True)
+    topup = await topup_service.create_topup(
+        session, user_id=user.id, amount_irt=60000, method=PaymentMethod.CARD
+    )
+    await topup_service.submit_card_receipt(
+        session, topup_id=topup.id, user_id=user.id, file_id="trcpt", file_type="photo"
+    )
+
+    result = await user_admin_service.block_user(session, user_id=user.id, admin_id=admin.id)
+    assert result == {"receipts_cleared": 3, "payments_cancelled": 1, "topups_cancelled": 1}
+    assert user.status is UserStatus.BLOCKED and user.is_blocked
+
+    await session.refresh(pending_payment)
+    await session.refresh(approved_payment)
+    await session.refresh(topup)
+    assert pending_payment.status is PaymentStatus.CANCELLED
+    assert pending_payment.receipt_file_id is None
+    assert approved_payment.status is PaymentStatus.APPROVED  # history intact
+    assert approved_payment.receipt_file_id is None  # but its receipt is gone
+    assert topup.status is PaymentStatus.CANCELLED
+    assert topup.receipt_file_id is None
+
+    await user_admin_service.unblock_user(session, user_id=user.id, admin_id=admin.id)
+    assert user.status is UserStatus.ACTIVE
+    assert pending_payment.receipt_file_id is None  # receipts never come back
+
+
+async def test_block_admin_is_refused(session) -> None:
+    from tests.factories import make_user
+
+    from vpnbot.services import user_admin as user_admin_service
+    from vpnbot.services.auth import bootstrap_owner
+
+    admin = await bootstrap_owner(session, telegram_id=900000421)
+    user = await make_user(session, telegram_id=900000421)
+    try:
+        await user_admin_service.block_user(session, user_id=user.id, admin_id=admin.id)
+    except user_admin_service.UserAdminError:
+        pass
+    else:
+        raise AssertionError("an admin's user row must not be blockable")
+    assert user.is_active
+
+
+async def test_blocked_user_middleware_drops_everything_but_start() -> None:
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from aiogram.types import Chat, Message
+    from aiogram.types import User as TgUser
+
+    from vpnbot.bot.middlewares.context import BlockedUserMiddleware
+
+    middleware = BlockedUserMiddleware()
+    blocked = SimpleNamespace(is_blocked=True)
+    active = SimpleNamespace(is_blocked=False)
+    calls: list = []
+
+    async def handler(event, data):  # noqa: ANN001, ANN202
+        calls.append(event)
+        return "handled"
+
+    chat = Chat(id=1, type="private")
+    tg_user = TgUser(id=1, is_bot=False, first_name="تست")
+
+    def msg(text=None):  # noqa: ANN001, ANN202
+        return Message(
+            message_id=1, date=datetime.now(UTC), chat=chat, from_user=tg_user, text=text
+        )
+
+    # Plain text, a "receipt" photo message and commands other than /start: dropped.
+    assert await middleware(handler, msg("سلام"), {"user": blocked, "admin": None}) is None
+    assert await middleware(handler, msg(None), {"user": blocked, "admin": None}) is None
+    assert await middleware(handler, msg("/menu"), {"user": blocked, "admin": None}) is None
+    # /start passes so the blocked screen can render.
+    assert await middleware(handler, msg("/start"), {"user": blocked, "admin": None}) == "handled"
+    assert await middleware(handler, msg("/start ref_x"), {"user": blocked, "admin": None}) == "handled"
+    # An admin is never gated by a blocked customer row.
+    assert await middleware(handler, msg("سلام"), {"user": blocked, "admin": SimpleNamespace()}) == "handled"
+    # Active users are untouched.
+    assert await middleware(handler, msg("سلام"), {"user": active, "admin": None}) == "handled"
+    assert len(calls) == 4
+

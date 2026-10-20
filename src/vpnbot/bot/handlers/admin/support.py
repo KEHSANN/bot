@@ -14,6 +14,7 @@ from vpnbot.db.enums import Permission, TicketSender, TicketStatus
 from vpnbot.db.models.support import Ticket
 from vpnbot.db.models.users import Admin, User
 from vpnbot.services import support as support_service
+from vpnbot.services import user_admin as user_admin_service
 
 router = Router(name="admin.support")
 
@@ -101,6 +102,11 @@ async def _show_thread(
     if ticket.status is not TicketStatus.CLOSED:
         rows.append([common.btn("✍️ پاسخ", "support", "reply", ticket.id)])
         rows.append([common.btn("✅ بستن تیکت", "support", "close", ticket.id)])
+    if user is not None:
+        if user.is_blocked:
+            rows.append([common.btn("♻️ رفع بلاک کاربر", "support", "unblock", ticket.id)])
+        else:
+            rows.append([common.btn("🚫 بلاک کاربر", "support", "block", ticket.id)])
     rows.append([common.btn("🔄 بروزرسانی", "support", "view", ticket.id)])
     rows.append([common.back("support")])
     await common.reply(target, "\n".join(lines), rows)
@@ -150,6 +156,60 @@ async def support_router(
             session, admin, "support.ticket_closed", entity_type="ticket", entity_id=ticket.id
         )
         await callback.answer("تیکت بسته شد")
+        await _show_thread(callback, session, admin, ticket.id)
+        return
+
+    if action == "block":
+        ticket = await session.get(Ticket, callback_data.item_id)
+        if ticket is None:
+            await common.alert(callback, "تیکت یافت نشد.")
+            return
+        user = await session.get(User, ticket.user_id)
+        await callback.answer()
+        await common.reply(
+            callback,
+            f"<b>🚫 بلاک «{common.escape(user.display_name) if user else 'کاربر'}»</b>\n\n"
+            "کاربر دیگر هیچ پیامی نمی‌تواند بدهد، همه رسیدهایش پاک و "
+            "پرداخت‌ها و شارژهای در انتظارش لغو می‌شوند.\n\nمطمئنید؟",
+            [common.yes_no("support", "block_yes", ticket.id), [common.back("support")]],
+        )
+        return
+
+    if action == "block_yes":
+        ticket = await session.get(Ticket, callback_data.item_id)
+        if ticket is None:
+            await common.alert(callback, "تیکت یافت نشد.")
+            return
+        try:
+            result = await user_admin_service.block_user(
+                session, user_id=ticket.user_id, admin_id=admin.id
+            )
+        except user_admin_service.UserAdminError as exc:
+            await common.alert(callback, f"⚠️ {exc}")
+            return
+        ticket.status = TicketStatus.CLOSED
+        await callback.answer("کاربر بلاک و تیکت بسته شد")
+        await common.reply(
+            callback,
+            "🚫 <b>کاربر بلاک شد و تیکت بسته شد.</b>\n\n"
+            f"رسیدهای پاک‌شده: {common.money(result['receipts_cleared'])}\n"
+            f"پرداخت‌های لغوشده: {common.money(result['payments_cancelled'])}\n"
+            f"شارژهای لغوشده: {common.money(result['topups_cancelled'])}",
+            [[common.back("support")]],
+        )
+        return
+
+    if action == "unblock":
+        ticket = await session.get(Ticket, callback_data.item_id)
+        if ticket is None:
+            await common.alert(callback, "تیکت یافت نشد.")
+            return
+        try:
+            await user_admin_service.unblock_user(session, user_id=ticket.user_id, admin_id=admin.id)
+        except user_admin_service.UserAdminError as exc:
+            await common.alert(callback, f"⚠️ {exc}")
+            return
+        await callback.answer("بلاک کاربر برداشته شد")
         await _show_thread(callback, session, admin, ticket.id)
         return
 
