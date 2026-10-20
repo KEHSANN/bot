@@ -1,25 +1,33 @@
-"""Customer order history and order details.
+"""Customer order history, order details and config re-delivery.
 
-Configs are never shown here: they are delivered once, in the chat, at the
-moment an administrator approves the payment (``services.fulfillment``). This
-screen only reports status, so a customer can see where the order stands.
+The pair is delivered in the chat at approval time; the order detail also
+carries a "view config / subscription" button so the customer can re-send
+it to themselves later — only ever to their own chat, only for their own
+fulfilled order, decrypted at tap time.
 """
 
 from __future__ import annotations
 
+import logging
+
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vpnbot.bot.handlers.customer.common import alert, base_context, money, sender_for
-from vpnbot.bot.keyboards.callbacks import ORDER_PAGE_SIZE, MenuCB, OrderCB, OrdersPageCB
-from vpnbot.db.enums import OrderStatus, PaymentStatus
+from vpnbot.bot.keyboards.callbacks import ORDER_PAGE_SIZE, MenuCB, OrderCB, OrderRevealCB, OrdersPageCB
+from vpnbot.bot.sender import send_config_pair
+from vpnbot.db.enums import InventoryStatus, OrderStatus, PaymentStatus
+from vpnbot.db.models.inventory import InventoryItem
 from vpnbot.db.models.orders import Order, Payment
 from vpnbot.db.models.users import User
 from vpnbot.jalali import format_jalali
+from vpnbot.services import inventory as inventory_service
 from vpnbot.services import orders as order_service
 from vpnbot.services.screens import STAGE_MY_ORDERS, STAGE_ORDER_DETAIL
 
+log = logging.getLogger(__name__)
 router = Router(name="customer.orders")
 
 ORDER_LABELS: dict[OrderStatus, str] = {
@@ -129,6 +137,18 @@ async def order_detail(
         await alert(callback, "این سفارش یافت نشد")
         return
 
+    extra_rows = []
+    if order.status is OrderStatus.FULFILLED:
+        extra_rows.append(
+            [
+                InlineKeyboardButton(
+                    text="📥 مشاهده کانفیگ / لینک اشتراک",
+                    callback_data=OrderRevealCB(order_id=order.id).pack(),
+                    style="primary",
+                )
+            ]
+        )
+
     await sender_for(callback.bot, session).show(
         callback,
         STAGE_ORDER_DETAIL,
@@ -141,4 +161,66 @@ async def order_detail(
             status=status_label(order),
             date=format_jalali(order.created_at, with_time=True),
         ),
+        extra_rows=extra_rows,
     )
+
+
+@router.callback_query(OrderRevealCB.filter())
+async def reveal_config(
+    callback: CallbackQuery, callback_data: OrderRevealCB, session: AsyncSession, user: User | None
+) -> None:
+    """Re-send the delivered pair to the order's owner — nobody else.
+
+    Ownership is enforced by ``user_order`` (id + user_id), the pair is
+    decrypted at tap time and sent as a fresh private message in this
+    chat; nothing is rendered into the shared screen message.
+    """
+    if user is None:
+        await callback.answer()
+        return
+    order = await order_service.user_order(session, order_id=callback_data.order_id, user_id=user.id)
+    if order is None:
+        await alert(callback, "این سفارش یافت نشد")
+        return
+    if order.status is not OrderStatus.FULFILLED:
+        await alert(callback, "این سفارش هنوز تحویل نشده است")
+        return
+    item = (
+        await session.execute(
+            select(InventoryItem)
+            .where(
+                InventoryItem.assigned_order_id == order.id,
+                InventoryItem.status == InventoryStatus.DELIVERED,
+            )
+            .order_by(InventoryItem.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if item is None:
+        await alert(callback, "برای این سفارش کانفیگی یافت نشد؛ با پشتیبانی در تماس باشید")
+        return
+
+    from vpnbot.config import get_settings
+    from vpnbot.security.crypto import CredentialCipher
+
+    cipher = CredentialCipher(get_settings().inventory_encryption_key)
+    try:
+        pair = await inventory_service.reveal_pair(session, cipher=cipher, item_id=item.id)
+    except Exception:  # noqa: BLE001 - decryption/key problems must not crash the tap
+        log.exception("customer reveal failed for order %s", order.id)
+        await alert(callback, "نمایش کانفیگ ممکن نشد؛ با پشتیبانی در تماس باشید")
+        return
+    try:
+        await send_config_pair(
+            callback.bot,
+            chat_id=user.telegram_id,
+            config=pair.config,
+            sub_url=pair.subscription_url,
+            product_title=order.product_title_snapshot,
+            order_ref=order.public_id,
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("customer reveal send failed for order %s", order.id)
+        await alert(callback, "ارسال کانفیگ ناموفق بود؛ دوباره تلاش کنید")
+        return
+    await callback.answer("📥 کانفیگ در پیام جدیدی برایتان ارسال شد")

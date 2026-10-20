@@ -18,6 +18,7 @@ CRYPTO_SETTINGS = "payment.crypto"
 SUPPORT_SETTINGS = "support"
 SHOP_SETTINGS = "shop"
 REFERRAL_SETTINGS = "referral"
+WALLET_SETTINGS = "wallet"
 
 DEFAULTS: dict[str, dict[str, Any]] = {
     CARD_SETTINGS: {
@@ -52,6 +53,10 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "tier2_enabled": True,
         "tier2_threshold": 5,
         "tier2_reward_irt": 10000,
+    },
+    WALLET_SETTINGS: {
+        "topup_enabled": True,
+        "min_topup_irt": 10000,
     },
 }
 

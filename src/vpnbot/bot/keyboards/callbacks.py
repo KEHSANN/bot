@@ -47,6 +47,12 @@ class OrderCB(CallbackData, prefix="o"):
     order_id: int
 
 
+class OrderRevealCB(CallbackData, prefix="or"):
+    """Ask the bot to re-send this order's delivered config / sub link."""
+
+    order_id: int
+
+
 class OrdersPageCB(CallbackData, prefix="op"):
     page: int = 0
 

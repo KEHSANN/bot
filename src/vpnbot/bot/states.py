@@ -12,6 +12,15 @@ class CheckoutStates(StatesGroup):
     confirming = State()
 
 
+class WalletStates(StatesGroup):
+    """Wallet top-up: amount first, then evidence for the chosen method."""
+
+    entering_amount = State()
+    choosing_method = State()
+    awaiting_receipt = State()
+    awaiting_txid = State()
+
+
 class SupportStates(StatesGroup):
     awaiting_message = State()
 

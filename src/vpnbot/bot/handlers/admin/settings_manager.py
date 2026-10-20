@@ -83,6 +83,14 @@ CATALOG: tuple[tuple[str, str, tuple[tuple[str, str, str], ...]], ...] = (
             ("tier2_reward_irt", "پاداش سطح دو (تومان)", "money"),
         ),
     ),
+    (
+        S.WALLET_SETTINGS,
+        "👛 کیف پول و شارژ",
+        (
+            ("topup_enabled", "شارژ کیف پول توسط کاربر فعال", "bool"),
+            ("min_topup_irt", "حداقل مبلغ شارژ (تومان)", "money"),
+        ),
+    ),
 )
 
 KIND_HINTS = {

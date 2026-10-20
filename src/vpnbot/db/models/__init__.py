@@ -10,7 +10,7 @@ from vpnbot.db.models.referral import ReferralReward
 from vpnbot.db.models.support import Ticket, TicketMessage
 from vpnbot.db.models.system import AppSetting, AuditEvent, Job
 from vpnbot.db.models.users import Admin, Role, User
-from vpnbot.db.models.wallet import LedgerEntry, WalletAccount
+from vpnbot.db.models.wallet import LedgerEntry, WalletAccount, WalletTopUp
 
 __all__ = [
     "Admin",
@@ -39,4 +39,5 @@ __all__ = [
     "TicketMessage",
     "User",
     "WalletAccount",
+    "WalletTopUp",
 ]
