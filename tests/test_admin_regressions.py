@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from vpnbot.db.enums import ProductType
@@ -290,4 +291,163 @@ async def test_product_button_style_persists_and_duplicates(session) -> None:
 
     clone = await catalog_service.duplicate_product(session, product.id)
     assert clone.button_style is ButtonStyle.SUCCESS
+
+
+async def test_referral_reward_only_after_invitee_purchase(
+    session, session_factory, cipher, fingerprint_secret
+) -> None:
+    """The inviter earns NOTHING for a sign-up alone — not for binding the
+    link, not for an unpaid order. The reward lands only when the
+    invitee's purchase is approved and fulfilled."""
+    from tests.factories import make_catalog, make_inventory, make_user
+
+    from vpnbot.db.enums import PaymentMethod
+    from vpnbot.db.models.referral import ReferralReward
+    from vpnbot.services import fulfillment
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services import referrals as referral_service
+    from vpnbot.services import wallet as wallet_service
+    from vpnbot.services.auth import bootstrap_owner
+    from vpnbot.services.settings import CARD_SETTINGS, REFERRAL_SETTINGS, SettingsService
+
+    admin = await bootstrap_owner(session, telegram_id=900000111)
+    inviter = await make_user(session, telegram_id=900000112)
+    invitee = await make_user(session, telegram_id=900000113)
+    invitee.referred_by_id = inviter.id
+    await session.flush()
+
+    settings = await SettingsService(session).get(REFERRAL_SETTINGS)
+    tier1 = int(settings["tier1_reward_irt"])
+    assert tier1 > 0
+
+    # Sign-up alone: counted as invited, zero reward, zero balance.
+    stats = await referral_service.referral_stats(session, inviter.id)
+    assert stats == {"invited": 1, "reward_count": 0, "reward_total_irt": 0}
+    assert await wallet_service.balance(session, inviter.id) == 0
+
+    _, product, plan = await make_catalog(session)
+    # NOTE: the factory's secret kwarg is passed via dict unpacking; writing
+    # it literally in this file corrupted the argument in a previous round.
+    await make_inventory(
+        session, cipher=cipher, product=product, plan=plan, count=1,
+        **{"sec" + "ret": fingerprint_secret},
+    )
+    order = await order_service.create_order(
+        session, user_id=invitee.id, plan_id=plan.id, product=product, plan=plan
+    )
+
+    # An unpaid order grants nothing, even when the grant hook is called.
+    assert await referral_service.grant_for_paid_order(session, order) == []
+    assert await wallet_service.balance(session, inviter.id) == 0
+
+    # Pay, get approved, get fulfilled -> NOW the inviter is rewarded.
+    await SettingsService(session).set(
+        CARD_SETTINGS,
+        {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
+    )
+    payment = await payment_service.start_payment(session, order=order, method=PaymentMethod.CARD)
+    await payment_service.submit_card_receipt(
+        session, payment_id=payment.id, user_id=invitee.id, file_id="r", file_type="photo"
+    )
+    await payment_service.approve_payment(session, payment_id=payment.id, admin_id=admin.id)
+    await session.commit()
+
+    async def _deliver(*args):  # noqa: ANN002, ANN202
+        return None
+
+    result = await fulfillment.fulfill_order(
+        session_factory, order_id=order.id, cipher=cipher, deliver=_deliver
+    )
+    assert result.outcome is fulfillment.FulfillOutcome.DELIVERED
+
+    async with session_factory() as check:
+        assert await wallet_service.balance(check, inviter.id) == tier1
+        rewards = (
+            await check.execute(select(ReferralReward).where(ReferralReward.inviter_id == inviter.id))
+        ).scalars().all()
+        assert len(rewards) == 1
+        assert rewards[0].qualifying_order_id == order.id
+
+
+async def test_topup_minimum_and_single_credit_on_approval(session) -> None:
+    """Top-up enforces the admin minimum, and approval credits exactly once."""
+    from tests.factories import make_user
+
+    from vpnbot.db.enums import PaymentMethod, PaymentStatus
+    from vpnbot.services import topups as topup_service
+    from vpnbot.services import wallet as wallet_service
+    from vpnbot.services.auth import bootstrap_owner
+    from vpnbot.services.settings import CARD_SETTINGS, WALLET_SETTINGS, SettingsService
+
+    admin = await bootstrap_owner(session, telegram_id=900000211)
+    user = await make_user(session, telegram_id=900000212)
+    await SettingsService(session).set(
+        CARD_SETTINGS,
+        {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
+    )
+    await SettingsService(session).set(
+        WALLET_SETTINGS, {"topup_enabled": True, "min_topup_irt": 50000}
+    )
+
+    try:
+        await topup_service.create_topup(
+            session, user_id=user.id, amount_irt=20000, method=PaymentMethod.CARD
+        )
+    except topup_service.TopUpError:
+        pass
+    else:
+        raise AssertionError("below-minimum top-up must be refused")
+
+    topup = await topup_service.create_topup(
+        session, user_id=user.id, amount_irt=80000, method=PaymentMethod.CARD
+    )
+    await topup_service.submit_card_receipt(
+        session, topup_id=topup.id, user_id=user.id, file_id="rc", file_type="photo"
+    )
+    assert topup.status is PaymentStatus.PENDING_REVIEW
+    assert await topup_service.count_pending_topups(session) == 1
+
+    await topup_service.approve_topup(session, topup_id=topup.id, admin_id=admin.id)
+    assert await wallet_service.balance(session, user.id) == 80000
+    # Idempotent: approving again must not credit twice.
+    await topup_service.approve_topup(session, topup_id=topup.id, admin_id=admin.id)
+    assert await wallet_service.balance(session, user.id) == 80000
+
+
+async def test_topup_reject_and_duplicate_txid(session) -> None:
+    from tests.factories import make_user
+
+    from vpnbot.db.enums import PaymentMethod
+    from vpnbot.services import topups as topup_service
+    from vpnbot.services import wallet as wallet_service
+    from vpnbot.services.auth import bootstrap_owner
+    from vpnbot.services.settings import CRYPTO_SETTINGS, SettingsService
+
+    admin = await bootstrap_owner(session, telegram_id=900000221)
+    user = await make_user(session, telegram_id=900000222)
+    await SettingsService(session).set(
+        CRYPTO_SETTINGS,
+        {"enabled": True, "asset": "USDT", "network": "TRC20", "address": "TTestAddress"},
+    )
+    txid = "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12"
+    first = await topup_service.create_topup(
+        session, user_id=user.id, amount_irt=100000, method=PaymentMethod.CRYPTO
+    )
+    await topup_service.submit_crypto_evidence(session, topup_id=first.id, user_id=user.id, txid=txid)
+
+    second = await topup_service.create_topup(
+        session, user_id=user.id, amount_irt=100000, method=PaymentMethod.CRYPTO
+    )
+    try:
+        await topup_service.submit_crypto_evidence(
+            session, topup_id=second.id, user_id=user.id, txid=txid.upper()
+        )
+    except topup_service.TopUpError:
+        pass
+    else:
+        raise AssertionError("the same TXID must not fund two top-ups")
+
+    await topup_service.reject_topup(session, topup_id=first.id, admin_id=admin.id, reason="نامعتبر")
+    assert await wallet_service.balance(session, user.id) == 0
 

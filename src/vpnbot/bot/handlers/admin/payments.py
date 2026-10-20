@@ -21,8 +21,10 @@ from vpnbot.bot.states import AdminStates
 from vpnbot.db.enums import PaymentMethod, PaymentStatus, Permission
 from vpnbot.db.models.orders import Payment
 from vpnbot.db.models.users import Admin
+from vpnbot.db.models.wallet import WalletTopUp
 from vpnbot.services import orders as order_service
 from vpnbot.services import payments as payment_service
+from vpnbot.services import topups as topup_service
 
 log = logging.getLogger(__name__)
 router = Router(name="admin.payments")
@@ -56,6 +58,10 @@ async def _show_list(
     nav = common.pager("payments", "", page, total_pages)
     if nav:
         rows.append(nav)
+    pending_topups = await topup_service.count_pending_topups(session)
+    rows.append(
+        [common.btn(f"➕ شارژهای کیف پول در انتظار: {common.money(pending_topups)}", "topups", "")]
+    )
     rows.append([common.back()])
     await common.reply(
         target,
@@ -125,6 +131,157 @@ async def _show_payment(
         # The receipt is customer content, not inventory: safe for reviewers.
         pass
     await common.reply(target, "\n".join(lines), rows)
+
+
+async def _show_topups(
+    target: CallbackQuery | Message, session: AsyncSession, admin: Admin, page: int
+) -> None:
+    total = await topup_service.count_pending_topups(session)
+    total_pages = max(1, (total + common.ADMIN_PAGE_SIZE - 1) // common.ADMIN_PAGE_SIZE)
+    page = min(max(0, page), total_pages - 1)
+    topups = await topup_service.pending_topups(
+        session, offset=page * common.ADMIN_PAGE_SIZE, limit=common.ADMIN_PAGE_SIZE
+    )
+    rows = []
+    for topup in topups:
+        rows.append(
+            [
+                common.btn(
+                    f"#{topup.id} · {common.money(topup.amount_irt)} · "
+                    f"{METHOD_LABELS.get(topup.method, topup.method.value)}",
+                    "topups",
+                    "view",
+                    topup.id,
+                )
+            ]
+        )
+    nav = common.pager("topups", "", page, total_pages)
+    if nav:
+        rows.append(nav)
+    rows.append([common.back("payments")])
+    await common.reply(
+        target,
+        f"<b>➕ شارژهای کیف پول در انتظار بررسی: {common.money(total)}</b>\n\n"
+        "با تأیید، مبلغ دقیقاً یک‌بار به کیف پول مشتری اضافه می‌شود.",
+        rows,
+    )
+
+
+async def _show_topup(
+    target: CallbackQuery | Message, session: AsyncSession, admin: Admin, topup_id: int
+) -> None:
+    topup = await session.get(WalletTopUp, topup_id)
+    if topup is None:
+        await common.reply(target, "درخواست شارژ یافت نشد.", [[common.back("topups")]])
+        return
+    from vpnbot.db.models.users import User
+
+    user = await session.get(User, topup.user_id)
+    user_line = "—"
+    if user is not None:
+        handle = f"@{user.username}" if user.username else "بدون یوزرنیم"
+        user_line = f"{handle} · <code>{user.telegram_id}</code>"
+    details = dict(topup.instructions_snapshot or {})
+    lines = [
+        f"<b>➕ شارژ کیف پول #{topup.id}</b>",
+        "",
+        f"مشتری: {user_line}",
+        f"روش: {METHOD_LABELS.get(topup.method, topup.method.value)}",
+        f"مبلغ: <b>{common.money(topup.amount_irt)} تومان</b>",
+        f"وضعیت: {topup.status.value}",
+        f"ارسال رسید: {common.date(topup.submitted_at)}",
+    ]
+    if topup.method is PaymentMethod.CARD:
+        lines.append(f"مقصد: {details.get('card_number', '—')} ({details.get('recipient_name', '—')})")
+    else:
+        lines.extend(
+            [
+                f"شبکه: {details.get('network', '—')} · {details.get('asset', '—')}",
+                f"TXID: <code>{common.escape(topup.txid or '—')}</code>",
+            ]
+        )
+    if topup.receipt_file_id:
+        lines.append(f"رسید: {topup.receipt_file_type or 'فایل'} پیوست شده")
+
+    rows: list[list] = []
+    if topup.status is PaymentStatus.PENDING_REVIEW:
+        rows.append(
+            [
+                common.btn("✅ تأیید و شارژ", "topups", "approve", topup.id),
+                common.btn("⛔️ رد شارژ", "topups", "reject", topup.id),
+            ]
+        )
+    if topup.receipt_file_id and topup.receipt_file_type:
+        rows.append([common.btn("👁 نمایش رسید", "topups", "receipt", topup.id)])
+    rows.append([common.back("topups")])
+    await common.reply(target, "\n".join(lines), rows)
+
+
+@router.callback_query(AdminCB.filter(F.section == "topups"))
+async def topups_router(
+    callback: CallbackQuery,
+    callback_data: AdminCB,
+    session: AsyncSession,
+    admin: Admin | None,
+    state: FSMContext,
+) -> None:
+    admin = common.guard(admin, Permission.PAYMENT_REVIEW)
+    action = callback_data.action
+
+    if action == "view":
+        await _show_topup(callback, session, admin, callback_data.item_id)
+        return
+
+    if action == "receipt":
+        topup = await session.get(WalletTopUp, callback_data.item_id)
+        if topup is not None and topup.receipt_file_id:
+            message = callback.message
+            if isinstance(message, Message):
+                try:
+                    if (topup.receipt_file_type or "").upper() == "PHOTO":
+                        await callback.bot.send_photo(message.chat.id, topup.receipt_file_id)
+                    else:
+                        await callback.bot.send_document(message.chat.id, topup.receipt_file_id)
+                    await callback.answer("رسید ارسال شد")
+                except TelegramBadRequest:
+                    await callback.answer("⚠️ ارسال رسید ناموفق بود.", show_alert=True)
+            else:
+                await callback.answer()
+        return
+
+    if action == "approve":
+        topup = await session.get(WalletTopUp, callback_data.item_id)
+        if topup is None:
+            await callback.answer("درخواست شارژ یافت نشد", show_alert=True)
+            return
+        await state.set_state(AdminStates.payment_note)
+        await state.update_data(topup_id=topup.id)
+        await callback.answer()
+        await common.reply(
+            callback,
+            f"<b>✅ تأیید شارژ #{topup.id}</b>\n\n"
+            "یادداشت تأیید را بفرستید (یا برای بدون یادداشت «-» بفرستید).\n"
+            f"با تأیید، {common.money(topup.amount_irt)} تومان به کیف پول مشتری اضافه می‌شود.",
+            [common.cancel_row()],
+        )
+        return
+
+    if action == "reject":
+        topup = await session.get(WalletTopUp, callback_data.item_id)
+        if topup is None:
+            await callback.answer("درخواست شارژ یافت نشد", show_alert=True)
+            return
+        await state.set_state(AdminStates.rejection_reason)
+        await state.update_data(topup_id=topup.id)
+        await callback.answer()
+        await common.reply(
+            callback,
+            f"<b>⛔️ رد شارژ #{topup.id}</b>\n\nدلیل رد را بفرستید:",
+            [common.cancel_row()],
+        )
+        return
+
+    await _show_topups(callback, session, admin, callback_data.page)
 
 
 @router.callback_query(AdminCB.filter(F.section == "payments"))
@@ -204,9 +361,29 @@ async def approve_input(
 ) -> None:
     admin = common.guard(admin, Permission.PAYMENT_REVIEW)
     data = await state.get_data()
-    payment_id = int(data.get("payment_id") or 0)
     note = (message.text or "").strip()
     note = None if note in {"", "-"} else note[:500]
+
+    topup_id = int(data.get("topup_id") or 0)
+    if topup_id:
+        try:
+            topup = await topup_service.approve_topup(
+                session, topup_id=topup_id, admin_id=admin.id, note=note
+            )
+        except topup_service.TopUpError as exc:
+            await state.clear()
+            await message.answer(f"⚠️ {exc}")
+            await _show_topups(message, session, admin, 0)
+            return
+        await state.clear()
+        await message.answer(
+            f"✅ شارژ #{topup.id} تأیید شد و {common.money(topup.amount_irt)} تومان "
+            "به کیف پول مشتری اضافه شد."
+        )
+        await _show_topups(message, session, admin, 0)
+        return
+
+    payment_id = int(data.get("payment_id") or 0)
     try:
         payment = await payment_service.approve_payment(
             session, payment_id=payment_id, admin_id=admin.id, note=note
@@ -230,11 +407,28 @@ async def reject_input(
 ) -> None:
     admin = common.guard(admin, Permission.PAYMENT_REVIEW)
     data = await state.get_data()
-    payment_id = int(data.get("payment_id") or 0)
     reason = (message.text or "").strip()
     if not reason:
         await message.answer("دلیل رد الزامی است. برای انصراف /cancel را بفرستید.")
         return
+
+    topup_id = int(data.get("topup_id") or 0)
+    if topup_id:
+        try:
+            topup = await topup_service.reject_topup(
+                session, topup_id=topup_id, admin_id=admin.id, reason=reason
+            )
+        except topup_service.TopUpError as exc:
+            await state.clear()
+            await message.answer(f"⚠️ {exc}")
+            await _show_topups(message, session, admin, 0)
+            return
+        await state.clear()
+        await message.answer(f"⛔️ شارژ #{topup.id} رد شد.")
+        await _show_topups(message, session, admin, 0)
+        return
+
+    payment_id = int(data.get("payment_id") or 0)
     try:
         payment = await payment_service.reject_payment(
             session, payment_id=payment_id, admin_id=admin.id, reason=reason
