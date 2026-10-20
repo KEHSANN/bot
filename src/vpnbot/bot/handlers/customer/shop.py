@@ -21,12 +21,14 @@ from vpnbot.bot.keyboards.callbacks import (
     MenuCB,
     PlanCB,
     ProductCB,
+    WalletBuyCB,
     paginator,
 )
 from vpnbot.db.models.catalog import Plan
 from vpnbot.db.models.users import User
 from vpnbot.money import format_irt_plain
 from vpnbot.services import catalog as catalog_service
+from vpnbot.services import wallet as wallet_service
 from vpnbot.services.screens import (
     STAGE_CHECKOUT,
     STAGE_NO_STOCK,
@@ -35,6 +37,7 @@ from vpnbot.services.screens import (
     STAGE_SHOP,
     normalize_style,
 )
+from vpnbot.services.settings import SHOP_SETTINGS, SettingsService
 
 router = Router(name="customer.shop")
 
@@ -209,6 +212,29 @@ async def open_product(
     )
 
 
+async def _wallet_buy_row(
+    session: AsyncSession, user: User | None, plan_id: int
+) -> list[InlineKeyboardButton] | None:
+    """The buy-with-wallet button, or None when the shop wallet is off.
+
+    Code-side (not part of the editable screens) so it appears on every
+    deployment without the owner editing screen templates.
+    """
+    if user is None:
+        return None
+    shop = await SettingsService(session).get(SHOP_SETTINGS)
+    if not shop.get("wallet_enabled", True):
+        return None
+    balance = await wallet_service.balance(session, user.id)
+    return [
+        InlineKeyboardButton(
+            text=f"👛 خرید با کیف پول (موجودی: {format_irt_plain(balance)} تومان)",
+            callback_data=WalletBuyCB(plan_id=plan_id).pack(),
+            style="primary",
+        )
+    ]
+
+
 @router.callback_query(PlanCB.filter())
 async def open_plan(
     callback: CallbackQuery, callback_data: PlanCB, session: AsyncSession, user: User | None
@@ -234,9 +260,14 @@ async def open_plan(
                 callback_data=BuyCB(plan_id=plan.id).pack(),
                 style="success",
             )
-        ],
-        [InlineKeyboardButton(text="🔙 بازگشت", callback_data=ProductCB(product_id=product.id).pack())],
+        ]
     ]
+    wallet_row = await _wallet_buy_row(session, user, plan.id)
+    if wallet_row is not None:
+        rows.append(wallet_row)
+    rows.append(
+        [InlineKeyboardButton(text="🔙 بازگشت", callback_data=ProductCB(product_id=product.id).pack())]
+    )
     await sender_for(callback.bot, session).show(
         callback,
         STAGE_PRODUCT_DETAIL,
@@ -282,6 +313,7 @@ async def begin_checkout(
 
     await state.clear()
     await state.update_data(plan_id=plan.id)
+    wallet_row = await _wallet_buy_row(session, user, plan.id)
     await sender_for(callback.bot, session).show(
         callback,
         STAGE_CHECKOUT,
@@ -291,4 +323,5 @@ async def begin_checkout(
             plan_title=plan.title,
             price=money(plan.price_irt),
         ),
+        extra_rows=[wallet_row] if wallet_row is not None else [],
     )

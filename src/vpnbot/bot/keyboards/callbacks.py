@@ -53,6 +53,13 @@ class OrderRevealCB(CallbackData, prefix="or"):
     order_id: int
 
 
+class WalletBuyCB(CallbackData, prefix="wb"):
+    """Buy this plan with the wallet balance. ``confirm`` 0 asks first."""
+
+    plan_id: int
+    confirm: int = 0
+
+
 class OrdersPageCB(CallbackData, prefix="op"):
     page: int = 0
 

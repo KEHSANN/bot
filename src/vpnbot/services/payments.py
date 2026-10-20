@@ -21,6 +21,7 @@ from vpnbot.db.enums import (
     DeliveryStatus,
     JobKind,
     JobStatus,
+    LedgerKind,
     OrderStatus,
     PaymentMethod,
     PaymentStatus,
@@ -28,7 +29,13 @@ from vpnbot.db.enums import (
 from vpnbot.db.models.orders import Order, Payment, PaymentReview
 from vpnbot.db.models.system import Job
 from vpnbot.services import audit as audit_service
-from vpnbot.services.settings import CARD_SETTINGS, CRYPTO_SETTINGS, SettingsService
+from vpnbot.services import wallet as wallet_service
+from vpnbot.services.settings import (
+    CARD_SETTINGS,
+    CRYPTO_SETTINGS,
+    SHOP_SETTINGS,
+    SettingsService,
+)
 
 
 class PaymentError(ValueError):
@@ -160,6 +167,101 @@ async def _payment_for_user(session: AsyncSession, payment_id: int, user_id: int
     order = await session.get(Order, payment.order_id)
     if order is None or order.user_id != user_id:
         raise PaymentError("پرداخت یافت نشد")
+    return payment
+
+
+async def pay_order_with_wallet(
+    session: AsyncSession, *, order: Order, user_id: int
+) -> Payment:
+    """Pay an order from the customer's wallet balance — no manual review.
+
+    The money is already inside the system, so the payment is approved
+    the moment the debit lands: debit (ledger idempotency key
+    ``order:<id>:wallet`` makes a double tap charge once), payment row
+    marked APPROVED with method WALLET, order moved to fulfilment and
+    exactly one FULFILL_ORDER job enqueued — the same tail as an admin
+    approval, so fulfilment and referral rewards behave identically.
+    """
+    if order.user_id != user_id:
+        raise PaymentError("سفارش یافت نشد")
+    shop = await SettingsService(session).get(SHOP_SETTINGS)
+    if not shop.get("wallet_enabled", True):
+        raise PaymentError("پرداخت با کیف پول در حال حاضر غیرفعال است")
+
+    payment = (
+        await session.execute(
+            select(Payment).where(Payment.order_id == order.id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if payment is not None and payment.status is PaymentStatus.APPROVED:
+        return payment  # already paid (any method) — never charge twice
+    if payment is not None and payment.status is PaymentStatus.PENDING_REVIEW:
+        raise PaymentError("این سفارش در حال بررسی پرداخت است و نمی‌توان روش آن را عوض کرد")
+    if order.status is not OrderStatus.PENDING_PAYMENT:
+        raise PaymentError("این سفارش قابل پرداخت نیست")
+
+    balance = await wallet_service.balance(session, user_id)
+    if balance < order.total_irt:
+        from vpnbot.money import format_irt_plain
+
+        raise PaymentError(
+            f"موجودی کیف پول کافی نیست (موجودی: {format_irt_plain(balance)} تومان، "
+            f"مبلغ سفارش: {format_irt_plain(order.total_irt)} تومان)"
+        )
+
+    try:
+        await wallet_service.debit(
+            session,
+            user_id=user_id,
+            amount_irt=order.total_irt,
+            kind=LedgerKind.PURCHASE,
+            key=f"order:{order.id}:wallet",
+            reason=f"خرید سفارش {order.public_id}",
+            ref_type="order",
+            ref_id=str(order.id),
+        )
+    except wallet_service.WalletError as exc:
+        # A concurrent spend drained the balance between the check above
+        # and the debit; surface it as a payment problem, not a crash.
+        raise PaymentError(str(exc)) from exc
+
+    now = utcnow()
+    if payment is None:
+        payment = Payment(order_id=order.id, amount_irt=order.total_irt, method=PaymentMethod.WALLET)
+        session.add(payment)
+    payment.method = PaymentMethod.WALLET
+    payment.amount_irt = order.total_irt
+    payment.status = PaymentStatus.APPROVED
+    payment.instructions_snapshot = {}
+    payment.submitted_at = now
+    payment.reviewed_at = now
+    payment.rejection_reason = None
+
+    order.status = OrderStatus.FULFILLMENT_PENDING
+    order.paid_at = order.paid_at or now
+    order.delivery_status = DeliveryStatus.PENDING
+    await session.flush()  # assigns payment.id for the audit row below
+
+    await audit_service.record(
+        session,
+        actor_type=AuditActor.CUSTOMER,
+        actor_id=user_id,
+        action="payment.wallet_paid",
+        entity_type="payment",
+        entity_id=payment.id,
+        data={"order_id": order.id, "amount_irt": order.total_irt},
+    )
+    await session.execute(
+        pg_insert(Job)
+        .values(
+            kind=JobKind.FULFILL_ORDER,
+            payload={"order_id": order.id},
+            idempotency_key=f"fulfill:{order.id}",
+            status=JobStatus.QUEUED,
+        )
+        .on_conflict_do_nothing(index_elements=["idempotency_key"])
+    )
+    await session.flush()
     return payment
 
 

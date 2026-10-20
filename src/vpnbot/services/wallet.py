@@ -139,8 +139,18 @@ async def debit(
 ) -> LedgerResult:
     if amount_irt <= 0:
         raise WalletError("مبلغ برداشت باید مثبت باشد")
+    # allow_negative must be passed explicitly: without it apply() rejects
+    # every debit ("use the debit method") — debit() IS that method, so it
+    # could never succeed. The balance floor is still enforced inside
+    # apply() via the new_balance < 0 check.
     return await apply(
-        session, user_id=user_id, amount_irt=-amount_irt, kind=kind, idempotency_key=key, **kw  # type: ignore[arg-type]
+        session,
+        user_id=user_id,
+        amount_irt=-amount_irt,
+        kind=kind,
+        idempotency_key=key,
+        allow_negative=True,
+        **kw,  # type: ignore[arg-type]
     )
 
 

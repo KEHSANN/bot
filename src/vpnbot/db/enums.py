@@ -54,6 +54,7 @@ class PaymentStatus(str, enum.Enum):
 class PaymentMethod(str, enum.Enum):
     CARD = "CARD"
     CRYPTO = "CRYPTO"
+    WALLET = "WALLET"
 
 
 class DeliveryStatus(str, enum.Enum):
