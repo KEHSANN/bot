@@ -16,15 +16,17 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vpnbot.bot.handlers.customer.common import alert, base_context, money, sender_for
-from vpnbot.bot.keyboards.callbacks import MenuCB
+from vpnbot.bot.keyboards.callbacks import MenuCB, ProductCB, WalletBuyCB
 from vpnbot.bot.states import CheckoutStates
 from vpnbot.db.enums import OrderStatus, PaymentMethod
 from vpnbot.db.models.catalog import Plan
 from vpnbot.db.models.orders import Order
 from vpnbot.db.models.users import User
+from vpnbot.money import format_irt_plain
 from vpnbot.services import catalog as catalog_service
 from vpnbot.services import orders as order_service
 from vpnbot.services import payments as payment_service
+from vpnbot.services import wallet as wallet_service
 from vpnbot.services.screens import (
     STAGE_MAIN_MENU,
     STAGE_PAYMENT_CARD,
@@ -148,6 +150,108 @@ async def choose_card(
     callback: CallbackQuery, session: AsyncSession, user: User | None, state: FSMContext
 ) -> None:
     await _start(callback, session, user, state, PaymentMethod.CARD)
+
+
+@router.callback_query(WalletBuyCB.filter())
+async def buy_with_wallet(
+    callback: CallbackQuery,
+    callback_data: WalletBuyCB,
+    session: AsyncSession,
+    user: User | None,
+    state: FSMContext,
+) -> None:
+    """Buy-with-wallet: first tap asks, second tap charges.
+
+    Charging is one tap away from spending real balance, so the first
+    tap only shows a confirmation with the exact price and the current
+    balance; the charge itself lives in
+    :func:`payments.pay_order_with_wallet` (idempotent — a repeated
+    confirm can never debit twice).
+    """
+    if user is None or user.is_blocked:
+        await alert(callback, "حساب شما فعال نیست")
+        return
+    plan = await catalog_service.get_plan(session, callback_data.plan_id)
+    if plan is None or not plan.is_on_sale:
+        await alert(callback, "این پلن در دسترس نیست")
+        return
+    product = await catalog_service.get_product(session, plan.product_id)
+    if product is None or not product.is_on_sale:
+        await alert(callback, "این محصول در دسترس نیست")
+        return
+    if await catalog_service.stock_for_plan(session, product.id, plan.id) <= 0:
+        await alert(callback, "موجودی این پلن تمام شده است")
+        return
+    balance = await wallet_service.balance(session, user.id)
+
+    if not callback_data.confirm:
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+        if balance < plan.price_irt:
+            await alert(
+                callback,
+                f"موجودی کیف پول کافی نیست\nموجودی: {format_irt_plain(balance)} تومان\n"
+                f"قیمت: {format_irt_plain(plan.price_irt)} تومان\n"
+                "از بخش کیف پول می‌توانید موجودی را افزایش دهید.",
+            )
+            return
+        await callback.answer()
+        message = callback.message
+        if isinstance(message, Message):
+            await message.answer(
+                "👛 <b>خرید با کیف پول</b>\n\n"
+                f"محصول: {product.title}\n"
+                f"پلن: {plan.title}\n"
+                f"مبلغ: <b>{format_irt_plain(plan.price_irt)} تومان</b>\n"
+                f"موجودی فعلی: {format_irt_plain(balance)} تومان\n"
+                f"موجودی بعد از خرید: {format_irt_plain(balance - plan.price_irt)} تومان\n\n"
+                "پرداخت انجام شود؟",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="✅ تأیید و پرداخت",
+                                callback_data=WalletBuyCB(plan_id=plan.id, confirm=1).pack(),
+                                style="success",
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text="🔙 بازگشت",
+                                callback_data=ProductCB(product_id=product.id).pack(),
+                            )
+                        ],
+                    ]
+                ),
+            )
+        return
+
+    # Confirmed: resolve (or create) the pending order and charge it.
+    data = await state.get_data()
+    try:
+        resolved = await _resolve_order(
+            session, user=user, plan_id=plan.id, existing_id=data.get("order_id")
+        )
+        if resolved is None:
+            await alert(callback, "این محصول در دسترس نیست")
+            return
+        order, _plan = resolved
+        await payment_service.pay_order_with_wallet(session, order=order, user_id=user.id)
+    except payment_service.PaymentError as exc:
+        await alert(callback, f"⚠️ {exc}")
+        return
+    await state.clear()
+    await callback.answer("✅ پرداخت با کیف پول انجام شد")
+    message = callback.message
+    if isinstance(message, Message):
+        new_balance = await wallet_service.balance(session, user.id)
+        await message.answer(
+            "✅ <b>خرید با کیف پول انجام شد</b>\n\n"
+            f"سفارش: <code>{order.public_id}</code>\n"
+            f"مبلغ پرداختی: {format_irt_plain(order.total_irt)} تومان\n"
+            f"موجودی باقی‌مانده: {format_irt_plain(new_balance)} تومان\n\n"
+            "کانفیگ شما تا لحظاتی دیگر در همین گفتگو ارسال می‌شود."
+        )
 
 
 @router.callback_query(MenuCB.filter(F.action == "paycrypto"))

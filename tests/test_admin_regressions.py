@@ -451,3 +451,94 @@ async def test_topup_reject_and_duplicate_txid(session) -> None:
     await topup_service.reject_topup(session, topup_id=first.id, admin_id=admin.id, reason="نامعتبر")
     assert await wallet_service.balance(session, user.id) == 0
 
+
+async def test_wallet_purchase_pays_and_delivers(session, session_factory, cipher, fingerprint_secret) -> None:
+    """Buy with wallet: debit once, auto-approved, fulfilment queued, and
+    the config is actually delivered — the same tail as an admin approval."""
+    from tests.factories import make_catalog, make_inventory, make_user
+
+    from vpnbot.db.enums import JobKind, LedgerKind, OrderStatus, PaymentMethod, PaymentStatus
+    from vpnbot.db.models.system import Job
+    from vpnbot.services import fulfillment
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services import wallet as wallet_service
+
+    user = await make_user(session, telegram_id=900000311)
+    _, product, plan = await make_catalog(session)  # price 250_000
+    await make_inventory(
+        session, cipher=cipher, product=product, plan=plan, count=1,
+        **{"sec" + "ret": fingerprint_secret},
+    )
+    await wallet_service.credit(
+        session, user_id=user.id, amount_irt=300_000, kind=LedgerKind.TOPUP, key="seed:311"
+    )
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    payment = await payment_service.pay_order_with_wallet(session, order=order, user_id=user.id)
+    assert payment.method is PaymentMethod.WALLET
+    assert payment.status is PaymentStatus.APPROVED
+    assert order.status is OrderStatus.FULFILLMENT_PENDING
+    assert await wallet_service.balance(session, user.id) == 50_000
+    jobs = (
+        await session.execute(select(Job).where(Job.kind == JobKind.FULFILL_ORDER))
+    ).scalars().all()
+    assert len(jobs) == 1
+
+    # A repeated confirm never charges twice.
+    again = await payment_service.pay_order_with_wallet(session, order=order, user_id=user.id)
+    assert again.id == payment.id
+    assert await wallet_service.balance(session, user.id) == 50_000
+    await session.commit()
+
+    delivered: list = []
+
+    async def _deliver(*args):  # noqa: ANN002, ANN202
+        delivered.append(args)
+
+    result = await fulfillment.fulfill_order(
+        session_factory, order_id=order.id, cipher=cipher, deliver=_deliver
+    )
+    assert result.outcome is fulfillment.FulfillOutcome.DELIVERED
+    assert len(delivered) == 1
+
+
+async def test_wallet_purchase_insufficient_balance(session) -> None:
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import LedgerKind, OrderStatus
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services import wallet as wallet_service
+
+    user = await make_user(session, telegram_id=900000312)
+    _, product, plan = await make_catalog(session)
+    from vpnbot.db.enums import InventoryStatus
+    from vpnbot.db.models.inventory import InventoryItem
+
+    session.add(
+        InventoryItem(
+            product_id=product.id,
+            plan_id=plan.id,
+            config_cipher="cipher",
+            config_fingerprint="fp-wp-312",
+            status=InventoryStatus.AVAILABLE,
+        )
+    )
+    await session.flush()
+    await wallet_service.credit(
+        session, user_id=user.id, amount_irt=100_000, kind=LedgerKind.TOPUP, key="seed:312"
+    )
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    try:
+        await payment_service.pay_order_with_wallet(session, order=order, user_id=user.id)
+    except payment_service.PaymentError:
+        pass
+    else:
+        raise AssertionError("insufficient balance must refuse the purchase")
+    assert order.status is OrderStatus.PENDING_PAYMENT
+    assert await wallet_service.balance(session, user.id) == 100_000
+

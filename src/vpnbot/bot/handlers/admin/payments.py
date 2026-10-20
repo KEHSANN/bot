@@ -29,7 +29,11 @@ from vpnbot.services import topups as topup_service
 log = logging.getLogger(__name__)
 router = Router(name="admin.payments")
 
-METHOD_LABELS = {PaymentMethod.CARD: "کارت به کارت", PaymentMethod.CRYPTO: "رمزارز"}
+METHOD_LABELS = {
+    PaymentMethod.CARD: "کارت به کارت",
+    PaymentMethod.CRYPTO: "رمزارز",
+    PaymentMethod.WALLET: "کیف پول",
+}
 
 
 async def _show_list(
