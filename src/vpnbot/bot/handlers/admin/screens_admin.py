@@ -63,13 +63,19 @@ def _preview_markup(rendered: screen_service.RenderedScreen) -> InlineKeyboardMa
     rows: dict[int, list[InlineKeyboardButton]] = {}
     for button in rendered.buttons:
         try:
+            # Carry the style into the preview too: without it the admin
+            # changed a button's colour, previewed, and saw no change.
+            style_kwargs: dict[str, object] = {}
+            style = screen_service.normalize_style(button.get("style"))
+            if style:
+                style_kwargs["style"] = style
             if button.get("url"):
-                item = InlineKeyboardButton(text=button["text"], url=button["url"])
+                item = InlineKeyboardButton(text=button["text"], url=button["url"], **style_kwargs)
             else:
                 # Inert on purpose: tapping a preview must not run the customer
                 # action from inside the admin chat.
                 item = InlineKeyboardButton(
-                    text=button["text"], callback_data=MenuCB(action="noop").pack()
+                    text=button["text"], callback_data=MenuCB(action="noop").pack(), **style_kwargs
                 )
         except Exception:  # noqa: BLE001 - a preview must never break the panel
             log.debug("skipping malformed preview button", exc_info=True)
@@ -253,9 +259,18 @@ async def _show_message(
 # --------------------------------------------------------------------------
 # Buttons
 # --------------------------------------------------------------------------
+def _style_label(style_raw: object) -> str:
+    """Human label for a stored style value, tolerant of legacy/bad data."""
+    style = str(style_raw or "DEFAULT").upper()
+    try:
+        return STYLE_LABELS.get(ButtonStyle(style), style)
+    except ValueError:
+        return style
+
+
 def _button_label(position: int, button: dict) -> str:
     style = str(button.get("style", "DEFAULT")).upper()
-    suffix = "" if style in ("DEFAULT", "") else f" · {STYLE_LABELS.get(ButtonStyle(style), style)}"
+    suffix = "" if style in ("DEFAULT", "") else f" · {_style_label(style)}"
     target = button.get("url") or button.get("action") or "?"
     return f"{position + 1}. {button.get('text', '?')} → {target}{suffix}"[:64]
 
@@ -309,7 +324,7 @@ async def _show_button(
         f"متن: {common.escape(str(button.get('text', '')))}",
         f"مقصد: <code>{common.escape(str(button.get('url') or button.get('action') or '—'))}</code>",
         f"ردیف: {button.get('row', 0)}",
-        f"استایل: {STYLE_LABELS.get(ButtonStyle(style), style)}",
+        f"استایل: {_style_label(style)}",
         f"وضعیت: {'فعال' if button.get('enabled', True) is not False else 'غیرفعال'}",
     ]
     rows = [
@@ -666,7 +681,7 @@ async def screens_router(
         if not 0 <= position < len(buttons):
             await common.alert(callback, "دکمه یافت نشد.")
             return
-        buttons[position]["style"] = action.split(":", 1)[1]
+        buttons[position]["style"] = action.split(":", 1)[1].upper()
         try:
             await service.save_draft(str(stage), buttons=buttons)
         except screen_service.TemplateError as exc:

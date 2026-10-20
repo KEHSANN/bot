@@ -114,9 +114,13 @@ async def _issue(
     )
     session.add(reward)
     try:
-        await session.flush()
+        # Savepoint, NOT session.rollback(): this runs inside the caller's
+        # transaction (fulfilment has already marked the order delivered).
+        # A full rollback on a duplicate grant undid the delivery writes
+        # while the config had already been sent to the customer.
+        async with session.begin_nested():
+            await session.flush()
     except IntegrityError:
-        await session.rollback()
         return None  # already granted for this invitee/tier
     result = await wallet_service.credit(
         session,

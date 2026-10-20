@@ -14,6 +14,7 @@ Rendering contract
 
 from __future__ import annotations
 
+import copy
 import html
 import re
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from vpnbot.db.base import utcnow
 from vpnbot.db.enums import ButtonStyle, MessageType
@@ -115,26 +117,25 @@ CALLBACK_MAX_LEN = 64
 
 #: Callback namespaces a button may target. Handlers own these; anything else
 #: is rejected so a mis-edited button cannot invoke an arbitrary handler.
+#: Only actions with a real customer handler belong here — ``plan``, ``buy``,
+#: ``pay``, ``order`` and ``back`` used to be allowed but nothing handles
+#: them (they also need an id the rendered button cannot carry), so an
+#: admin could configure a permanently dead button that validated fine.
 ALLOWED_ACTIONS: frozenset[str] = frozenset(
     {
         "home",
         "shop",
         "cats",
         "prods",
-        "plan",
-        "buy",
-        "pay",
         "paycard",
         "paycrypto",
         "orders",
-        "order",
         "wallet",
         "referral",
         "support",
         "support_new",
         "guide",
         "terms",
-        "back",
         "cancel",
         "noop",
     }
@@ -644,8 +645,11 @@ class ScreenService:
             screen = ScreenDefinition(
                 stage=stage,
                 title=default["title"],
-                draft_messages=default["messages"],
-                draft_buttons=default["buttons"],
+                # Deep copies: the draft must never alias the module-level
+                # defaults, or an in-place edit would corrupt them for
+                # every other screen/process.
+                draft_messages=copy.deepcopy(default["messages"]),
+                draft_buttons=copy.deepcopy(default["buttons"]),
             )
             self.session.add(screen)
             await self.session.flush()
@@ -695,11 +699,26 @@ class ScreenService:
         screen = await self.get_or_create(stage)
         if screen.is_locked:
             raise TemplateError("این صفحه قفل است و قابل ویرایش نیست")
-        new_messages = list(messages if messages is not None else screen.draft_messages)
-        new_buttons = list(buttons if buttons is not None else screen.draft_buttons)
+        # Deep-copy before assigning. Callers routinely edit the loaded
+        # draft dicts in place (``buttons[i]["style"] = ...``, toggling
+        # ``enabled``, changing a row). Those dicts *are* the ORM-loaded
+        # JSON value, so a shallow ``list(...)`` copy compares equal to the
+        # "old" value and SQLAlchemy emits no UPDATE at all — the edit
+        # showed in-session, then silently reverted on the next load
+        # (admins saw button colours / toggles / message edits not stick).
+        # A deep copy plus an explicit flag_modified makes the write
+        # unconditional.
+        new_messages = copy.deepcopy(
+            list(messages if messages is not None else screen.draft_messages)
+        )
+        new_buttons = copy.deepcopy(
+            list(buttons if buttons is not None else screen.draft_buttons)
+        )
         validate_screen(new_messages, new_buttons)
         screen.draft_messages = new_messages
         screen.draft_buttons = new_buttons
+        flag_modified(screen, "draft_messages")
+        flag_modified(screen, "draft_buttons")
         if title:
             screen.title = title[:120]
         await self.session.flush()
@@ -722,8 +741,10 @@ class ScreenService:
         version = ScreenVersion(
             screen_id=screen.id,
             version=next_version,
-            messages=list(screen.draft_messages),
-            buttons=list(screen.draft_buttons),
+            # Deep copies: a published version is immutable history and must
+            # not share dict objects with the still-editable draft.
+            messages=copy.deepcopy(list(screen.draft_messages)),
+            buttons=copy.deepcopy(list(screen.draft_buttons)),
             published_by_admin_id=admin_id,
             published_at=utcnow(),
             note=(note or "")[:300] or None,
@@ -745,8 +766,10 @@ class ScreenService:
         ).scalar_one_or_none()
         if old is None:
             raise TemplateError("نسخه مورد نظر یافت نشد")
-        screen.draft_messages = list(old.messages)
-        screen.draft_buttons = list(old.buttons)
+        screen.draft_messages = copy.deepcopy(list(old.messages))
+        screen.draft_buttons = copy.deepcopy(list(old.buttons))
+        flag_modified(screen, "draft_messages")
+        flag_modified(screen, "draft_buttons")
         await self.session.flush()
         await self.publish(stage, admin_id=admin_id, note=f"بازگردانی به نسخه {version_no}")
         return screen

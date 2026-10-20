@@ -39,9 +39,11 @@ async def get_or_create_account(session: AsyncSession, user_id: int) -> WalletAc
         account = WalletAccount(user_id=user_id, balance_irt=0)
         session.add(account)
         try:
-            await session.flush()
+            # Savepoint: a full rollback here would amputate the caller's
+            # transaction (see referrals._issue for the fulfilment case).
+            async with session.begin_nested():
+                await session.flush()
         except IntegrityError:
-            await session.rollback()
             account = (
                 await session.execute(select(WalletAccount).where(WalletAccount.user_id == user_id))
             ).scalar_one()
@@ -90,11 +92,6 @@ async def apply(
     if new_balance < 0:
         raise WalletError("موجودی کیف پول کافی نیست")
 
-    await session.execute(
-        update(WalletAccount)
-        .where(WalletAccount.id == locked.id)
-        .values(balance_irt=new_balance, updated_at=utcnow())
-    )
     entry = LedgerEntry(
         wallet_id=locked.id,
         user_id=user_id,
@@ -108,11 +105,20 @@ async def apply(
         actor_id=actor_id,
         idempotency_key=idempotency_key,
     )
-    session.add(entry)
     try:
-        await session.flush()
+        # The balance UPDATE and the ledger insert share one savepoint: on
+        # a duplicate-key race both must roll back together, but the
+        # caller's outer transaction must survive (a full rollback here
+        # used to undo unrelated work, e.g. a completed fulfilment).
+        async with session.begin_nested():
+            await session.execute(
+                update(WalletAccount)
+                .where(WalletAccount.id == locked.id)
+                .values(balance_irt=new_balance, updated_at=utcnow())
+            )
+            session.add(entry)
+            await session.flush()
     except IntegrityError:
-        await session.rollback()
         prior = await _existing(session, idempotency_key)
         if prior is None:
             raise
