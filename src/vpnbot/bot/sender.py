@@ -189,25 +189,37 @@ class ScreenSender:
                     await asyncio.sleep(delay)
                 last = index == len(messages) - 1
                 markup = _markup(screen, extra_rows) if last else None
-                if msg["type"] == "TEXT":
-                    await _with_style_fallback(
-                        lambda m, text=msg["text"]: self.bot.send_message(
-                            chat_id=chat_id,
-                            text=text,
-                            reply_markup=m,
-                            parse_mode="HTML",
-                            disable_web_page_preview=True,
-                        ),
-                        markup,
-                    )
-                else:
-                    await _with_style_fallback(
-                        lambda m, media=msg: self._send_media(chat_id, media, m),
-                        markup,
-                    )
-        except TelegramRetryAfter as exc:
-            await asyncio.sleep(exc.retry_after + 1)
-            return await self._send_messages(chat_id, screen, skip_first=skip_first)
+                # Retry THIS message on a rate limit, not the whole screen:
+                # the old code recursed from the first message (duplicating
+                # everything already sent) and dropped ``extra_rows``.
+                for attempt in range(3):
+                    try:
+                        if msg["type"] == "TEXT":
+                            await _with_style_fallback(
+                                lambda m, text=msg["text"]: self.bot.send_message(
+                                    chat_id=chat_id,
+                                    text=text,
+                                    reply_markup=m,
+                                    parse_mode="HTML",
+                                    disable_web_page_preview=True,
+                                ),
+                                markup,
+                            )
+                        else:
+                            await _with_style_fallback(
+                                lambda m, media=msg: self._send_media(chat_id, media, m),
+                                markup,
+                            )
+                        break
+                    except TelegramRetryAfter as exc:
+                        if attempt == 2:
+                            log.warning(
+                                "rate limited sending screen %s to %s; giving up this send",
+                                screen.stage,
+                                chat_id,
+                            )
+                            return False
+                        await asyncio.sleep(exc.retry_after + 1)
         except TelegramForbiddenError:
             log.info("user blocked the bot: chat_id=%s", chat_id)
             return False
@@ -279,18 +291,24 @@ async def send_config_pair(
 
     Sent as one message with the pair in ``<pre>`` so it is easy to copy, plus a
     separate subscription link message when present.
+
+    Every interpolated value is HTML-escaped: VPN URIs routinely contain
+    ``&`` in their query string, and unescaped the Bot API HTML parser
+    rejects the whole delivery.
     """
+    import html as _html
+
     lines = [
         "🎉 <b>سفارش شما تأیید شد</b>",
         "",
-        f"محصول: {product_title}",
-        f"کد سفارش: <code>{order_ref}</code>",
+        f"محصول: {_html.escape(product_title)}",
+        f"کد سفارش: <code>{_html.escape(order_ref)}</code>",
         "",
         "<b>کانفیگ:</b>",
-        f"<pre>{config}</pre>",
+        f"<pre>{_html.escape(config)}</pre>",
     ]
     if sub_url:
-        lines.extend(["", "<b>لینک اشتراک:</b>", sub_url])
+        lines.extend(["", "<b>لینک اشتراک:</b>", _html.escape(sub_url)])
     lines.extend(
         [
             "",

@@ -8,6 +8,7 @@ root router, and log failures without ever echoing a config or sub URL.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 
 from aiogram import Dispatcher
@@ -89,10 +90,27 @@ def build_dispatcher(
 
 
 async def on_error(event) -> bool:
-    """Last-resort handler: log once, never leak payload contents."""
+    """Last-resort handler: log once, never leak payload contents.
+
+    One exception gets user feedback instead of silence: ``AdminDenied``.
+    Every admin guard raises it, and without this branch a permission-
+    mismatched tap looked exactly like a dead button — spinner, rollback,
+    no message at all.
+    """
     exc = event.exception
     update = event.update
     who = "?"
+    try:
+        from vpnbot.bot.handlers.admin.common import DENIED_TEXT, AdminDenied
+
+        if isinstance(exc, AdminDenied):
+            callback = getattr(update, "callback_query", None) if update is not None else None
+            if callback is not None:
+                with contextlib.suppress(Exception):
+                    await callback.answer(DENIED_TEXT, show_alert=True)
+            return True
+    except Exception:  # noqa: BLE001 - feedback must not mask the original error path
+        log.debug("could not answer AdminDenied callback", exc_info=True)
     try:
         inner = update.event if update is not None else None
         user = getattr(inner, "from_user", None)

@@ -90,7 +90,17 @@ async def _show_products(
         limit=PRODUCT_PAGE_SIZE,
     )
     total_pages = max(1, (total + PRODUCT_PAGE_SIZE - 1) // PRODUCT_PAGE_SIZE)
-    page = min(max(0, page), total_pages - 1)
+    clamped = min(max(0, page), total_pages - 1)
+    if clamped != page:
+        # A stale/forged page beyond the end used to render an empty list;
+        # the query above already ran with the unclamped offset.
+        page = clamped
+        products, total = await catalog_service.list_products(
+            session,
+            category_id=category_id or None,
+            offset=page * PRODUCT_PAGE_SIZE,
+            limit=PRODUCT_PAGE_SIZE,
+        )
 
     stock = await catalog_service.available_counts(session, [p.id for p in products])
     rows: list[list[InlineKeyboardButton]] = []

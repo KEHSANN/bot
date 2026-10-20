@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from vpnbot.db.enums import DeliveryStatus, OrderStatus
+from vpnbot.db.enums import DeliveryStatus, OrderStatus, PaymentMethod
 from vpnbot.db.models.catalog import Plan, Product
 from vpnbot.db.models.orders import Order, Payment
 from vpnbot.services import catalog as catalog_service
@@ -99,7 +99,9 @@ async def count_user_orders(session: AsyncSession, user_id: int) -> int:
 async def attach_payment(session: AsyncSession, order: Order) -> Payment:
     if order.payment is not None:
         return order.payment
-    payment = Payment(order_id=order.id, amount_irt=order.total_irt, method="CARD")  # type: ignore[arg-type]
+    # Enum member, not the bare string: a plain ``str`` stays on the cached
+    # instance and breaks later ``payment.method.value`` lookups in-session.
+    payment = Payment(order_id=order.id, amount_irt=order.total_irt, method=PaymentMethod.CARD)
     session.add(payment)
     await session.flush()
     return payment

@@ -39,6 +39,19 @@ class User(Base, TimestampMixin):
     def display_name(self) -> str:
         return self.first_name or self.username or f"کاربر {self.telegram_id}"
 
+    @property
+    def is_active(self) -> bool:
+        """Handlers use this (and ``is_blocked``); the column is ``status``.
+
+        These properties were missing, so ``/start`` and every checkout
+        entry point raised ``AttributeError`` and died silently.
+        """
+        return self.status == UserStatus.ACTIVE
+
+    @property
+    def is_blocked(self) -> bool:
+        return self.status == UserStatus.BLOCKED
+
 
 class Role(Base):
     __tablename__ = "roles"

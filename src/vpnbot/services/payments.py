@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from vpnbot.db.base import utcnow
 from vpnbot.db.enums import (
+    AuditActor,
     DeliveryStatus,
     JobKind,
     JobStatus,
@@ -83,7 +84,7 @@ async def submit_card_receipt(
     ):
         raise PaymentError("امکان ارسال مجدد رسید در این وضعیت وجود ندارد")
     payment.receipt_file_id = file_id
-    payment.receipt_file_type = file_type
+    payment.receipt_file_type = file_type.upper() if file_type else file_type
     payment.status = PaymentStatus.PENDING_REVIEW
     payment.submitted_at = utcnow()
     payment.rejection_reason = None
@@ -126,7 +127,7 @@ async def submit_crypto_evidence(
 
     payment.txid = normalized
     payment.receipt_file_id = file_id
-    payment.receipt_file_type = file_type
+    payment.receipt_file_type = file_type.upper() if file_type else file_type
     payment.status = PaymentStatus.PENDING_REVIEW
     payment.submitted_at = utcnow()
     payment.rejection_reason = None
@@ -202,7 +203,7 @@ async def approve_payment(
     session.add(PaymentReview(payment_id=payment.id, admin_id=admin_id, decision="APPROVED", reason=note))
     await audit_service.record(
         session,
-        actor_type="ADMIN",  # type: ignore[arg-type]
+        actor_type=AuditActor.ADMIN,
         actor_id=admin_id,
         action="payment.approved",
         entity_type="payment",
@@ -252,7 +253,7 @@ async def reject_payment(
     )
     await audit_service.record(
         session,
-        actor_type="ADMIN",  # type: ignore[arg-type]
+        actor_type=AuditActor.ADMIN,
         actor_id=admin_id,
         action="payment.rejected",
         entity_type="payment",

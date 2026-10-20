@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vpnbot.db.base import utcnow
-from vpnbot.db.enums import InventoryStatus
+from vpnbot.db.enums import InventoryStatus, ProductType
 from vpnbot.db.models.catalog import Category, Plan, Product
 from vpnbot.db.models.inventory import InventoryItem
 
@@ -130,17 +130,29 @@ async def create_product(
     title: str,
     description: str | None,
     category_id: int | None,
-    product_type: str = "CONFIG",
+    product_type: str | ProductType = "CONFIG",
     image_file_id: str | None = None,
     sort_order: int = 0,
 ) -> Product:
     if not title.strip():
         raise CatalogError("نام محصول الزامی است")
+    # Normalise to the enum member, never a bare string: the ORM keeps the
+    # assigned value on the instance for the rest of the session, and a plain
+    # ``str`` there breaks every later ``product.product_type.value`` lookup
+    # (the product-creation wizard crashed exactly that way and, thanks to
+    # rollback-on-error, the tap on the type buttons looked like a no-op).
+    if isinstance(product_type, ProductType):
+        resolved_type = product_type
+    else:
+        try:
+            resolved_type = ProductType(str(product_type).strip().upper())
+        except ValueError as exc:
+            raise CatalogError("نوع محصول نامعتبر است") from exc
     product = Product(
         title=title.strip(),
         description=description,
         category_id=category_id,
-        product_type=product_type,  # type: ignore[arg-type]
+        product_type=resolved_type,
         image_file_id=image_file_id,
         sort_order=sort_order,
         is_active=False,
@@ -156,6 +168,10 @@ async def create_plan(
 ) -> Plan:
     if price_irt <= 0:
         raise CatalogError("قیمت باید بزرگ‌تر از صفر باشد")
+    if await get_product(session, product_id) is None:
+        # Without this, a product deleted mid-wizard surfaced as a raw FK
+        # IntegrityError — a silent crash instead of a clean message.
+        raise CatalogError("محصول یافت نشد")
     plan = Plan(
         product_id=product_id,
         title=title.strip(),
@@ -185,8 +201,11 @@ async def duplicate_product(session: AsyncSession, product_id: int) -> Product:
     source = await get_product(session, product_id)
     if source is None:
         raise CatalogError("محصول یافت نشد")
+    suffix = " (کپی)"
     clone = Product(
-        title=f"{source.title} (کپی)",
+        # The wizard allows 160-char titles; appending the suffix blindly
+        # overflowed the String(160) column and the duplicate tap crashed.
+        title=f"{source.title[: 160 - len(suffix)]}{suffix}",
         description=source.description,
         category_id=source.category_id,
         image_file_id=source.image_file_id,
