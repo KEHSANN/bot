@@ -83,6 +83,18 @@ async def _show_products(
         limit=common.ADMIN_PAGE_SIZE,
     )
     total_pages = max(1, (total + common.ADMIN_PAGE_SIZE - 1) // common.ADMIN_PAGE_SIZE)
+    clamped = min(max(0, page), total_pages - 1)
+    if clamped != page:
+        # Clamp before rendering (see customer shop): an out-of-range page
+        # otherwise shows an empty list with a working-looking pager.
+        page = clamped
+        products, total = await catalog_service.list_products(
+            session,
+            category_id=category_id or None,
+            active_only=False,
+            offset=page * common.ADMIN_PAGE_SIZE,
+            limit=common.ADMIN_PAGE_SIZE,
+        )
     stock = await catalog_service.available_counts(session, [p.id for p in products])
 
     rows = []
@@ -121,10 +133,22 @@ async def _show_product(target: CallbackQuery | Message, session: AsyncSession, 
     stock = await catalog_service.available_plan_ids(session, product.id)
     plans = [p for p in product.plans if p.archived_at is None]
 
+    # ``product_type`` should always be a ProductType, but tolerate a bare
+    # string (legacy rows / manually seeded data) instead of crashing on
+    # ``.value`` — a crash here rolls the whole wizard transaction back.
+    raw_type = product.product_type
+    if isinstance(raw_type, ProductType):
+        type_label = TYPE_LABELS.get(raw_type, raw_type.value)
+    else:
+        try:
+            type_label = TYPE_LABELS.get(ProductType(str(raw_type)), str(raw_type))
+        except ValueError:
+            type_label = str(raw_type)
+
     lines = [
         f"<b>🛍 {common.escape(product.title)}</b>",
         "",
-        f"نوع: {TYPE_LABELS.get(product.product_type, product.product_type.value)}",
+        f"نوع: {type_label}",
         f"دسته: {common.escape(product.category.title) if product.category else '—'}",
         f"وضعیت: {'فعال' if product.is_active else 'غیرفعال'}"
         f" · فروش: {'روشن' if product.sales_enabled else 'خاموش'}"
@@ -273,7 +297,6 @@ async def catalog_router(
         draft = dict(data.get("draft") or {})
         product_type = TYPE_BY_CODE.get(str(callback_data.item_id), ProductType.CONFIG)
         draft["product_type"] = product_type.value
-        await state.clear()
         await callback.answer()
         try:
             product = await catalog_service.create_product(
@@ -281,11 +304,16 @@ async def catalog_router(
                 title=str(draft.get("title") or "بدون نام"),
                 description=None,
                 category_id=draft.get("category_id"),
-                product_type=product_type.value,
+                product_type=product_type,
             )
         except catalog_service.CatalogError as exc:
+            await state.clear()
             await common.reply(callback, f"⚠️ {exc}", [[common.back("catalog")]])
             return
+        # Clear the wizard state only once creation has actually succeeded:
+        # clearing first meant a failure silently discarded the whole draft
+        # while the admin stayed on the same screen with no explanation.
+        await state.clear()
         await common.audit(session, admin, "catalog.product_created", entity_type="product", entity_id=product.id)
         await _show_product(callback, session, admin, product.id)
     else:
@@ -508,10 +536,17 @@ async def plan_input(message: Message, session: AsyncSession, admin: Admin | Non
         return
     if step == "price":
         try:
-            draft["price_irt"] = parse_amount_irt(raw)
+            price = parse_amount_irt(raw)
         except MoneyError as exc:
             await message.answer(f"⚠️ {exc}")
             return
+        if price <= 0:
+            # Reject here, at the step that can still be corrected;
+            # create_plan also refuses 0, but by the final step the
+            # admin could no longer fix the price without restarting.
+            await message.answer("⚠️ قیمت باید بزرگ‌تر از صفر باشد. دوباره بفرستید.")
+            return
+        draft["price_irt"] = price
         await state.update_data(draft=draft, step="days")
         await message.answer("مدت اعتبار به روز (۰ = نامحدود).")
         return
@@ -523,7 +558,6 @@ async def plan_input(message: Message, session: AsyncSession, admin: Admin | Non
 
     draft["traffic_gb"] = _optional_int(raw)
     product_id = int(data.get("product_id") or 0)
-    await state.clear()
     try:
         plan = await catalog_service.create_plan(
             session,
@@ -534,8 +568,11 @@ async def plan_input(message: Message, session: AsyncSession, admin: Admin | Non
             traffic_gb=draft.get("traffic_gb"),
         )
     except catalog_service.CatalogError as exc:
-        await message.answer(f"⚠️ {exc}")
+        # Keep the wizard state/draft (same fix as product creation):
+        # clearing first silently discarded title/price/days/traffic.
+        await message.answer(f"⚠️ {exc}\n\nبرای شروع دوباره /cancel را بزنید.")
         return
+    await state.clear()
     await common.audit(session, admin, "catalog.plan_created", entity_type="plan", entity_id=plan.id)
     await _show_plan(message, session, admin, plan.id)
 
@@ -554,7 +591,13 @@ async def plan_edit_input(message: Message, session: AsyncSession, admin: Admin 
 
     try:
         if field == "price_irt":
-            plan.price_irt = parse_amount_irt(raw)
+            price = parse_amount_irt(raw)
+            if price <= 0:
+                # create_plan enforces > 0 but this edit path assigns the
+                # ORM field directly, so a 0-price plan slipped through.
+                await message.answer("⚠️ قیمت باید بزرگ‌تر از صفر باشد. دوباره بفرستید یا /cancel را بزنید.")
+                return
+            plan.price_irt = price
         elif field == "title":
             plan.title = raw[:160]
         elif field in {"duration_days", "traffic_gb", "device_limit"}:

@@ -298,9 +298,15 @@ async def _materialize_recipients(
 async def _enqueue_dispatch(session: AsyncSession, campaign: BroadcastCampaign) -> None:
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+    from vpnbot.db.base import utcnow
     from vpnbot.db.enums import JobKind, JobStatus
     from vpnbot.db.models.system import Job
 
+    # The key is the same on first start and on resume (status is RUNNING
+    # in both cases), so a plain do-nothing insert silently skipped the
+    # enqueue whenever the earlier dispatch job already existed as DONE
+    # or FAILED — a resumed campaign stayed RUNNING forever with nothing
+    # being sent. Revive a finished job; never reset a live one.
     await session.execute(
         pg_insert(Job)
         .values(
@@ -309,7 +315,17 @@ async def _enqueue_dispatch(session: AsyncSession, campaign: BroadcastCampaign) 
             idempotency_key=f"broadcast:{campaign.id}:{campaign.status.value}",
             status=JobStatus.QUEUED,
         )
-        .on_conflict_do_nothing(index_elements=["idempotency_key"])
+        .on_conflict_do_update(
+            index_elements=["idempotency_key"],
+            set_={
+                "status": JobStatus.QUEUED,
+                "attempt": 0,
+                "scheduled_at": utcnow(),
+                "finished_at": None,
+                "last_error": None,
+            },
+            where=Job.status.in_([JobStatus.DONE, JobStatus.FAILED]),
+        )
     )
 
 

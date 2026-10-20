@@ -260,7 +260,10 @@ class Worker:
             if campaign is None:
                 return
             if campaign.status is CampaignStatus.PAUSED:
-                raise RuntimeError("campaign paused")
+                # Paused is a state, not a failure: finish quietly so the
+                # job does not burn its retry attempts while an admin has
+                # it paused. Resuming re-enqueues (and revives) dispatch.
+                return
             if campaign.status is not CampaignStatus.RUNNING:
                 return
 
@@ -300,7 +303,20 @@ class Worker:
                 await session.execute(
                     pg_insert(Job.__table__)
                     .values(rows)
-                    .on_conflict_do_nothing(index_elements=["idempotency_key"])
+                    # Revive a DONE/FAILED job for this recipient (e.g. one
+                    # that finished quietly while the campaign was paused);
+                    # a live QUEUED/RUNNING job must not be reset.
+                    .on_conflict_do_update(
+                        index_elements=["idempotency_key"],
+                        set_={
+                            "status": JobStatus.QUEUED,
+                            "attempt": 0,
+                            "scheduled_at": utcnow(),
+                            "finished_at": None,
+                            "last_error": None,
+                        },
+                        where=Job.__table__.c.status.in_([JobStatus.DONE, JobStatus.FAILED]),
+                    )
                 )
                 if len(recipients) < DISPATCH_PAGE:
                     break
@@ -342,7 +358,9 @@ class Worker:
             await self._mark_recipient(recipient_id, campaign_id, RecipientStatus.SKIPPED)
             return
         if campaign.status is CampaignStatus.PAUSED:
-            raise RuntimeError("campaign paused")
+            # Quiet finish, no retry burn (see _broadcast_dispatch); the
+            # recipient stays PENDING and is re-fanned-out on resume.
+            return
         if campaign.status is not CampaignStatus.RUNNING:
             return
 

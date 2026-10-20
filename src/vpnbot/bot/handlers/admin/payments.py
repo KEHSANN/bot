@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -144,13 +145,22 @@ async def payments_router(
     if action == "receipt":
         payment = await session.get(Payment, callback_data.item_id)
         if payment is not None and payment.receipt_file_id:
-            await callback.answer("در حال ارسال رسید…")
             message = callback.message
             if isinstance(message, Message):
-                if payment.receipt_file_type == "PHOTO":
-                    await callback.bot.send_photo(message.chat.id, payment.receipt_file_id)
-                else:
-                    await callback.bot.send_document(message.chat.id, payment.receipt_file_id)
+                # Producers store the type lowercase ("photo"/"document");
+                # comparing against "PHOTO" never matched, so photo
+                # receipts — the common case — were sent as documents and
+                # Telegram rejected them, crashing the tap with no feedback.
+                try:
+                    if (payment.receipt_file_type or "").upper() == "PHOTO":
+                        await callback.bot.send_photo(message.chat.id, payment.receipt_file_id)
+                    else:
+                        await callback.bot.send_document(message.chat.id, payment.receipt_file_id)
+                    await callback.answer("رسید ارسال شد")
+                except TelegramBadRequest:
+                    await callback.answer("⚠️ ارسال رسید ناموفق بود.", show_alert=True)
+            else:
+                await callback.answer()
         return
 
     if action == "approve":

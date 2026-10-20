@@ -44,6 +44,15 @@ async def _overview(
         session, active_only=False, offset=page * common.ADMIN_PAGE_SIZE, limit=common.ADMIN_PAGE_SIZE
     )
     total_pages = max(1, (total + common.ADMIN_PAGE_SIZE - 1) // common.ADMIN_PAGE_SIZE)
+    clamped = min(max(0, page), total_pages - 1)
+    if clamped != page:
+        page = clamped
+        products, total = await catalog_service.list_products(
+            session,
+            active_only=False,
+            offset=page * common.ADMIN_PAGE_SIZE,
+            limit=common.ADMIN_PAGE_SIZE,
+        )
     rows = []
     for product in products:
         counts = await inventory_service.counts_for_product(session, product.id)
@@ -196,7 +205,14 @@ async def inventory_router(
         return
 
     if action == "disable":
-        await inventory_service.disable_item(session, callback_data.item_id, reason="غیرفعال‌سازی دستی ادمین")
+        try:
+            await inventory_service.disable_item(session, callback_data.item_id, reason="غیرفعال‌سازی دستی ادمین")
+        except inventory_service.InventoryError as exc:
+            # e.g. the item was reserved by a purchase between rendering
+            # the list and this tap — report it instead of crashing the
+            # tap silently (rollback + unanswered callback).
+            await common.alert(callback, f"⚠️ {exc}")
+            return
         await common.audit(
             session,
             admin,
