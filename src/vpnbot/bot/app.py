@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from vpnbot.bot.handlers import build_root_router
 from vpnbot.bot.middlewares.context import (
     AdminLoaderMiddleware,
+    BlockedUserMiddleware,
     DbSessionMiddleware,
     ThrottleMiddleware,
     UserLoaderMiddleware,
@@ -71,13 +72,17 @@ def build_dispatcher(
     session_mw = DbSessionMiddleware(session_factory)
     user_mw = UserLoaderMiddleware()
     admin_mw = AdminLoaderMiddleware()
+    blocked_mw = BlockedUserMiddleware()
     throttle_mw = ThrottleMiddleware()
 
-    # Outer middleware: the same four objects, registered on both event types.
+    # Outer middleware: the same objects, registered on both event types.
+    # Order matters: blocked runs after the admin loader so an admin is
+    # never gated by their own customer row.
     for observer in (dp.message, dp.callback_query):
         observer.outer_middleware(session_mw)
         observer.outer_middleware(user_mw)
         observer.outer_middleware(admin_mw)
+        observer.outer_middleware(blocked_mw)
         observer.outer_middleware(throttle_mw)
     dp.my_chat_member.outer_middleware(session_mw)
     dp.my_chat_member.outer_middleware(user_mw)

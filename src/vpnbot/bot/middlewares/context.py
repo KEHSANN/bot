@@ -94,6 +94,37 @@ class AdminLoaderMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+class BlockedUserMiddleware(BaseMiddleware):
+    """A blocked customer cannot use the bot at all.
+
+    Runs after the user and admin loaders. Everything a BLOCKED user
+    sends is dropped before any handler: messages (including ones aimed
+    at an in-progress checkout/support FSM), photos and button taps.
+    Two exceptions:
+
+    * ``/start`` still goes through, so the customer sees the blocked
+      screen (and, after an unblock, the normal menu again);
+    * admins are never gated — an admin whose personal user row is
+      blocked keeps full panel access (blocking an admin's user row is
+      refused in the service layer anyway).
+    """
+
+    async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
+        if not isinstance(event, (Message, CallbackQuery)):
+            return await handler(event, data)
+        if data.get("admin") is not None:
+            return await handler(event, data)
+        user = data.get("user")
+        if user is None or not getattr(user, "is_blocked", False):
+            return await handler(event, data)
+        if isinstance(event, Message) and (event.text or "").startswith("/start"):
+            return await handler(event, data)
+        if isinstance(event, CallbackQuery):
+            with contextlib.suppress(Exception):
+                await event.answer("⛔️ دسترسی شما مسدود شده است", show_alert=True)
+        return None
+
+
 class TokenBucket:
     """Leaky token bucket with an injectable clock (unit-testable).
 
@@ -240,6 +271,7 @@ class ThrottleMiddleware(BaseMiddleware):
 
 __all__ = [
     "AdminLoaderMiddleware",
+    "BlockedUserMiddleware",
     "DbSessionMiddleware",
     "EVIDENCE_CONTENT_TYPES",
     "ThrottleMiddleware",

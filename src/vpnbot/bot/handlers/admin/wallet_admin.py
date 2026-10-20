@@ -25,6 +25,7 @@ from vpnbot.db.enums import LedgerKind, Permission
 from vpnbot.db.models.users import Admin, User
 from vpnbot.db.models.wallet import LedgerEntry, WalletAccount
 from vpnbot.money import MoneyError, parse_amount_irt
+from vpnbot.services import user_admin as user_admin_service
 from vpnbot.services import wallet as wallet_service
 
 router = Router(name="admin.wallet")
@@ -114,6 +115,7 @@ async def _show_user(
         "",
         f"شناسه تلگرام: <code>{user.telegram_id}</code>",
         f"نام کاربری: {'@' + user.username if user.username else '—'}",
+        f"وضعیت: {'⛔️ بلاک‌شده' if user.is_blocked else '✅ فعال'}",
         f"موجودی: <b>{common.money(balance)} تومان</b>",
         "",
         "<b>آخرین تراکنش‌ها:</b>",
@@ -135,9 +137,13 @@ async def _show_user(
             common.btn("➕ افزایش موجودی", "wallet", "in", user_id),
             common.btn("➖ کاهش موجودی", "wallet", "out", user_id),
         ],
-        [common.btn("🔄 بروزرسانی", "wallet", "user", user_id)],
-        [common.back("wallet")],
     ]
+    if user.is_blocked:
+        rows.append([common.btn("♻️ رفع بلاک", "wallet", "unblock", user_id)])
+    else:
+        rows.append([common.btn("🚫 بلاک کاربر", "wallet", "block", user_id)])
+    rows.append([common.btn("🔄 بروزرسانی", "wallet", "user", user_id)])
+    rows.append([common.back("wallet")])
     await common.reply(target, "\n".join(lines), rows)
 
 
@@ -165,6 +171,55 @@ async def wallet_router(
         return
 
     if action == "user":
+        await _show_user(callback, session, callback_data.item_id)
+        return
+
+    if action == "block":
+        user = await session.get(User, callback_data.item_id)
+        if user is None:
+            await common.alert(callback, "کاربر یافت نشد.")
+            return
+        await callback.answer()
+        await common.reply(
+            callback,
+            f"<b>🚫 بلاک «{common.escape(user.display_name)}»</b>\n\n"
+            "با بلاک کردن:\n"
+            "• کاربر دیگر هیچ پیامی نمی‌تواند به ربات بدهد\n"
+            "• <b>همه رسیدهایی (فیش‌ها) که فرستاده پاک می‌شوند</b>\n"
+            "• پرداخت‌ها و شارژهای در انتظار بررسی او لغو می‌شوند\n\n"
+            "مطمئنید؟",
+            [common.yes_no("wallet", "block_yes", user.id), [common.back("wallet")]],
+        )
+        return
+
+    if action == "block_yes":
+        try:
+            result = await user_admin_service.block_user(
+                session, user_id=callback_data.item_id, admin_id=admin.id
+            )
+        except user_admin_service.UserAdminError as exc:
+            await common.alert(callback, f"⚠️ {exc}")
+            return
+        await callback.answer("کاربر بلاک شد")
+        await common.reply(
+            callback,
+            "🚫 <b>کاربر بلاک شد.</b>\n\n"
+            f"رسیدهای پاک‌شده: {common.money(result['receipts_cleared'])}\n"
+            f"پرداخت‌های لغوشده: {common.money(result['payments_cancelled'])}\n"
+            f"شارژهای لغوشده: {common.money(result['topups_cancelled'])}",
+            [[common.back("wallet")]],
+        )
+        return
+
+    if action == "unblock":
+        try:
+            await user_admin_service.unblock_user(
+                session, user_id=callback_data.item_id, admin_id=admin.id
+            )
+        except user_admin_service.UserAdminError as exc:
+            await common.alert(callback, f"⚠️ {exc}")
+            return
+        await callback.answer("بلاک کاربر برداشته شد")
         await _show_user(callback, session, callback_data.item_id)
         return
 
