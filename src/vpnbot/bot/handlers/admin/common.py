@@ -76,11 +76,24 @@ def today_start():
 # --------------------------------------------------------------------------
 # Keyboard builders
 # --------------------------------------------------------------------------
-def btn(text: str, section: str, action: str = "", item_id: int = 0, page: int = 0) -> InlineKeyboardButton:
-    return InlineKeyboardButton(
-        text=text,
-        callback_data=AdminCB(section=section, action=action, item_id=item_id, page=page).pack(),
-    )
+def btn(
+    text: str,
+    section: str,
+    action: str = "",
+    item_id: int = 0,
+    page: int = 0,
+    *,
+    style: str | None = None,
+) -> InlineKeyboardButton:
+    kwargs: dict[str, object] = {
+        "text": text,
+        "callback_data": AdminCB(section=section, action=action, item_id=item_id, page=page).pack(),
+    }
+    if style:
+        # Telegram native button colour (primary/success/danger, lowercase);
+        # used in the admin product list to preview shop button colours.
+        kwargs["style"] = style
+    return InlineKeyboardButton(**kwargs)  # type: ignore[arg-type]
 
 
 def back(section: str = "home", text: str = "⬅️ بازگشت") -> InlineKeyboardButton:

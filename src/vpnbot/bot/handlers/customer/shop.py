@@ -33,6 +33,7 @@ from vpnbot.services.screens import (
     STAGE_PRODUCT_DETAIL,
     STAGE_PRODUCT_LIST,
     STAGE_SHOP,
+    normalize_style,
 )
 
 router = Router(name="customer.shop")
@@ -112,7 +113,12 @@ async def _show_products(
             if in_stock
             else MenuCB(action="noop").pack()
         )
-        rows.append([InlineKeyboardButton(text=label, callback_data=payload)])
+        # Per-product button colour, set by the admin on the product screen.
+        raw_style = getattr(product, "button_style", None)
+        style = normalize_style(raw_style.value if hasattr(raw_style, "value") else raw_style)
+        rows.append(
+            [InlineKeyboardButton(text=label, callback_data=payload, **({"style": style} if style else {}))]
+        )
 
     # Keep the category in the pager, otherwise "next" would fall back to all products.
     if category_id:

@@ -15,6 +15,7 @@ Order matters (outer first):
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import time
@@ -93,25 +94,103 @@ class AdminLoaderMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
-class ThrottleMiddleware(BaseMiddleware):
-    """Simple per-process limiter for noisy updates (callbacks and commands).
+class TokenBucket:
+    """Leaky token bucket with an injectable clock (unit-testable).
 
-    Not a security boundary — admin actions are still authorized server-side —
-    it only keeps a single chat from flooding the worker.
+    A bucket starts full, so normal bursts — tapping through a menu, or
+    tapping "pay by card" and immediately sending the receipt photo — pass
+    instantly. Sustained flooding is what gets limited.
     """
 
-    def __init__(self, *, min_interval_seconds: float = 0.35, window: int = 3000) -> None:
-        self.min_interval = min_interval_seconds
+    def __init__(self, capacity: float, refill_per_second: float) -> None:
+        self.capacity = capacity
+        self.refill = refill_per_second
+        self.tokens = capacity
+        self.updated = 0.0
+
+    def _sync(self, now: float) -> None:
+        elapsed = max(0.0, now - self.updated)
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.refill)
+        self.updated = now
+
+    def allow(self, now: float) -> bool:
+        self._sync(now)
+        if self.tokens >= 1.0:
+            self.tokens -= 1.0
+            return True
+        return False
+
+    def wait_seconds(self, now: float) -> float:
+        """How long until the next token is available."""
+        self._sync(now)
+        if self.tokens >= 1.0:
+            return 0.0
+        return (1.0 - self.tokens) / self.refill
+
+
+#: Attachment messages carry user evidence (payment receipts, crypto proof,
+#: support files). They are never dropped by the limiter — at worst they
+#: wait a moment for a token (see ThrottleMiddleware).
+EVIDENCE_CONTENT_TYPES = frozenset(
+    {"photo", "document", "video", "animation", "voice", "video_note"}
+)
+
+
+class ThrottleMiddleware(BaseMiddleware):
+    """Per-user anti-spam limiter for callbacks and messages.
+
+    Design goals (a flat "one update per 0.35s" gate failed both):
+
+    * **The bot stays up under flood.** Each user gets two token buckets —
+      one for button taps, one for messages — so a spammer burns only
+      their own budget and the taps/messages are shed cheaply, before any
+      database work of substance.
+    * **A paying customer never gets stuck.** Taps and messages have
+      *separate* budgets, so tapping "pay by card" cannot eat the budget
+      the receipt photo needs a second later; buckets start full, so the
+      normal checkout burst always passes; and attachment messages
+      (receipts!) are never discarded — under flood they are delayed by
+      at most ``evidence_max_wait`` seconds instead of dropped.
+    * **Feedback, not silence.** A shed tap gets a toast; a shed text
+      message gets one notice per ``notice_interval`` per user.
+    """
+
+    def __init__(
+        self,
+        *,
+        callback_capacity: float = 10,
+        callback_refill: float = 5.0,
+        message_capacity: float = 6,
+        message_refill: float = 1.5,
+        evidence_max_wait: float = 2.5,
+        notice_interval: float = 15.0,
+        window: int = 3000,
+    ) -> None:
+        self.callback_bucket_cfg = (callback_capacity, callback_refill)
+        self.message_bucket_cfg = (message_capacity, message_refill)
+        self.evidence_max_wait = evidence_max_wait
+        self.notice_interval = notice_interval
         self.window = window
-        self._last: dict[int, float] = {}
+        self._callbacks: dict[int, TokenBucket] = {}
+        self._messages: dict[int, TokenBucket] = {}
+        self._noticed: dict[int, float] = {}
         self._last_gc = time.monotonic()
 
     def _gc(self, now: float) -> None:
         if now - self._last_gc < 60:
             return
         cutoff = now - 120
-        self._last = {uid: ts for uid, ts in self._last.items() if ts >= cutoff}
+        self._callbacks = {u: b for u, b in self._callbacks.items() if b.updated >= cutoff}
+        self._messages = {u: b for u, b in self._messages.items() if b.updated >= cutoff}
+        self._noticed = {u: ts for u, ts in self._noticed.items() if ts >= cutoff}
         self._last_gc = now
+
+    def _bucket(self, store: dict[int, TokenBucket], cfg: tuple[float, float], uid: int) -> TokenBucket:
+        bucket = store.get(uid)
+        if bucket is None:
+            bucket = TokenBucket(*cfg)
+            store[uid] = bucket
+        return bucket
 
     async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
         if not isinstance(event, (Message, CallbackQuery)):
@@ -124,20 +203,46 @@ class ThrottleMiddleware(BaseMiddleware):
         now = time.monotonic()
         self._gc(now)
         uid = int(tg_user.id)
-        last = self._last.get(uid, 0.0)
-        if now - last < self.min_interval:
-            if isinstance(event, CallbackQuery):
-                # A failed toast must not turn a throttled tap into an error.
-                with contextlib.suppress(Exception):
-                    await event.answer("⏳ لطفاً کمی صبر کنید", show_alert=False)
+
+        if isinstance(event, CallbackQuery):
+            bucket = self._bucket(self._callbacks, self.callback_bucket_cfg, uid)
+            if bucket.allow(now):
+                return await handler(event, data)
+            with contextlib.suppress(Exception):
+                await event.answer("⏳ لطفاً کمی آرام‌تر", show_alert=False)
             return None
-        self._last[uid] = now
-        return await handler(event, data)
+
+        # Messages.
+        bucket = self._bucket(self._messages, self.message_bucket_cfg, uid)
+        if bucket.allow(now):
+            return await handler(event, data)
+
+        content_type = getattr(event, "content_type", None)
+        content_value = getattr(content_type, "value", content_type)
+        if str(content_value) in EVIDENCE_CONTENT_TYPES:
+            wait = bucket.wait_seconds(now)
+            if wait <= self.evidence_max_wait:
+                # Never lose a receipt: hold the update briefly instead
+                # of dropping it. Under genuine flood this still caps the
+                # rate — the sender just experiences a short delay.
+                await asyncio.sleep(wait + 0.05)
+                if bucket.allow(time.monotonic()):
+                    return await handler(event, data)
+            # Even evidence cannot wait forever; fall through to the
+            # notice path so the user knows to resend in a moment.
+        last_notice = self._noticed.get(uid, 0.0)
+        if now - last_notice >= self.notice_interval:
+            self._noticed[uid] = now
+            with contextlib.suppress(Exception):
+                await event.answer("⏳ پیام‌های شما خیلی سریع می‌رسند؛ چند ثانیه صبر کنید و دوباره بفرستید.")
+        return None
 
 
 __all__ = [
     "AdminLoaderMiddleware",
     "DbSessionMiddleware",
+    "EVIDENCE_CONTENT_TYPES",
     "ThrottleMiddleware",
+    "TokenBucket",
     "UserLoaderMiddleware",
 ]

@@ -8,7 +8,7 @@ import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from vpnbot.db.base import Base, TimestampMixin, enum_type
-from vpnbot.db.enums import ProductType
+from vpnbot.db.enums import ButtonStyle, ProductType
 
 
 class Category(Base, TimestampMixin):
@@ -35,6 +35,11 @@ class Product(Base, TimestampMixin):
     image_file_id: Mapped[str | None] = mapped_column(sa.String(256))
     product_type: Mapped[ProductType] = mapped_column(
         enum_type(ProductType), default=ProductType.CONFIG, nullable=False
+    )
+    #: Colour of this product's button in the customer shop list
+    #: (Telegram native button styles; DEFAULT = no colour).
+    button_style: Mapped[ButtonStyle] = mapped_column(
+        enum_type(ButtonStyle), default=ButtonStyle.DEFAULT, nullable=False
     )
     specs: Mapped[dict] = mapped_column(sa.JSON, default=dict, nullable=False)
     is_active: Mapped[bool] = mapped_column(sa.Boolean, default=True, nullable=False, index=True)

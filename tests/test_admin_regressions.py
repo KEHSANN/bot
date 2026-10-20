@@ -200,3 +200,94 @@ async def test_send_config_pair_escapes_html() -> None:
     assert "a=1&amp;b=2" in text
     assert "<b>تست</b>" not in text.replace("<b>کانفیگ:</b>", "")
 
+
+# --- Round 3 features: product delete, anti-spam limiter, product colours --
+
+
+async def test_delete_product_removes_plans_and_unsold_stock(session) -> None:
+    from tests.factories import make_catalog
+
+    from vpnbot.db.enums import InventoryStatus
+    from vpnbot.db.models.inventory import InventoryItem
+
+    _, product, plan = await make_catalog(session)
+    for i in range(2):
+        session.add(
+            InventoryItem(
+                product_id=product.id,
+                plan_id=plan.id,
+                config_cipher="cipher",
+                config_fingerprint=f"fp-del-{product.id}-{i}",
+                status=InventoryStatus.AVAILABLE,
+            )
+        )
+    await session.flush()
+    removed = await catalog_service.delete_product(session, product.id)
+    assert removed == {"plans": 1, "inventory": 2}
+    assert await catalog_service.get_product(session, product.id) is None
+    assert await catalog_service.get_plan(session, plan.id) is None
+    assert await catalog_service.stock_for_plan(session, product.id, plan.id) == 0
+
+
+async def test_delete_product_with_order_is_refused(session) -> None:
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import InventoryStatus
+    from vpnbot.db.models.inventory import InventoryItem
+    from vpnbot.services import orders as order_service
+
+    user = await make_user(session)
+    _, product, plan = await make_catalog(session)
+    session.add(
+        InventoryItem(
+            product_id=product.id,
+            plan_id=plan.id,
+            config_cipher="cipher",
+            config_fingerprint=f"fp-ord-{product.id}",
+            status=InventoryStatus.AVAILABLE,
+        )
+    )
+    await session.flush()
+    await order_service.create_order(session, user_id=user.id, plan_id=plan.id, product=product, plan=plan)
+    try:
+        await catalog_service.delete_product(session, product.id)
+    except catalog_service.CatalogError:
+        pass
+    else:
+        raise AssertionError("a product with orders must not be deletable")
+    assert await catalog_service.get_product(session, product.id) is not None
+
+
+def test_token_bucket_burst_refill_and_wait() -> None:
+    from vpnbot.bot.middlewares.context import TokenBucket
+
+    bucket = TokenBucket(capacity=3, refill_per_second=1.0)
+    assert bucket.allow(100.0) and bucket.allow(100.0) and bucket.allow(100.0)
+    assert not bucket.allow(100.0)  # burst exhausted
+    assert bucket.wait_seconds(100.0) == 1.0
+    assert not bucket.allow(100.5)  # half a token is not a token
+    assert bucket.allow(101.0)  # refilled
+    # Long idle refills only up to capacity, never beyond.
+    assert bucket.allow(200.0) and bucket.allow(200.0) and bucket.allow(200.0)
+    assert not bucket.allow(200.0)
+
+
+async def test_product_button_style_persists_and_duplicates(session) -> None:
+    from vpnbot.db.enums import ButtonStyle
+
+    product = await catalog_service.create_product(
+        session,
+        title="محصول رنگی",
+        description=None,
+        category_id=None,
+        product_type=ProductType.CONFIG,
+    )
+    assert product.button_style is ButtonStyle.DEFAULT
+    product.button_style = ButtonStyle.SUCCESS
+    await session.flush()
+    await session.refresh(product)
+    assert product.button_style is ButtonStyle.SUCCESS
+
+    clone = await catalog_service.duplicate_product(session, product.id)
+    assert clone.button_style is ButtonStyle.SUCCESS
+

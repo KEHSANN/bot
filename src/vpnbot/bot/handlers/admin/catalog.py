@@ -17,11 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vpnbot.bot.handlers.admin import common
 from vpnbot.bot.keyboards.callbacks import AdminCB
 from vpnbot.bot.states import AdminStates
-from vpnbot.db.enums import Permission, ProductType
+from vpnbot.db.enums import ButtonStyle, Permission, ProductType
 from vpnbot.db.models.catalog import Product
 from vpnbot.db.models.users import Admin
 from vpnbot.money import MoneyError, parse_amount_irt
 from vpnbot.services import catalog as catalog_service
+from vpnbot.services.screens import normalize_style
 
 log = logging.getLogger(__name__)
 router = Router(name="admin.catalog")
@@ -32,6 +33,22 @@ TYPE_LABELS = {
     ProductType.COMBO: "کانفیگ + اشتراک",
 }
 TYPE_BY_CODE = {"1": ProductType.CONFIG, "2": ProductType.SUBSCRIPTION, "3": ProductType.COMBO}
+BUTTON_STYLE_LABELS = {
+    ButtonStyle.DEFAULT: "پیش‌فرض (بدون رنگ)",
+    ButtonStyle.PRIMARY: "آبی",
+    ButtonStyle.SUCCESS: "سبز",
+    ButtonStyle.DANGER: "قرمز",
+}
+
+
+def _button_style_of(product: Product) -> ButtonStyle:
+    raw = getattr(product, "button_style", None)
+    if isinstance(raw, ButtonStyle):
+        return raw
+    try:
+        return ButtonStyle(str(raw or "DEFAULT").upper())
+    except ValueError:
+        return ButtonStyle.DEFAULT
 
 
 # --------------------------------------------------------------------------
@@ -107,6 +124,7 @@ async def _show_products(
                     "product",
                     "",
                     product.id,
+                    style=normalize_style(_button_style_of(product).value),
                 )
             ]
         )
@@ -154,6 +172,7 @@ async def _show_product(target: CallbackQuery | Message, session: AsyncSession, 
         f" · فروش: {'روشن' if product.sales_enabled else 'خاموش'}"
         + (" · آرشیو شده" if product.archived_at else ""),
         f"پلن‌ها: {common.money(len(plans))} · موجودی کل: <b>{common.money(sum(stock.values()))}</b>",
+        f"🎨 رنگ دکمه در فروشگاه: {BUTTON_STYLE_LABELS[_button_style_of(product)]}",
     ]
     if product.description:
         lines.extend(["", common.escape(product.description[:400])])
@@ -174,6 +193,39 @@ async def _show_product(target: CallbackQuery | Message, session: AsyncSession, 
         [
             common.btn("➕ پلن جدید", "plans", "new", product.id),
             common.btn("✏️ ویرایش نام", "product", "rename", product.id),
+        ]
+    )
+    # Per-product shop button colour (applies immediately, no publish step —
+    # product buttons are dynamic, not part of the editable screens).
+    current_style = _button_style_of(product)
+    rows.append(
+        [
+            common.btn(
+                f"{'✓ ' if key is current_style else ''}{label}",
+                "product",
+                f"style:{key.value}",
+                product.id,
+                style=normalize_style(key.value),
+            )
+            for key, label in (
+                (ButtonStyle.DEFAULT, "پیش‌فرض"),
+                (ButtonStyle.PRIMARY, "🔵 آبی"),
+            )
+        ]
+    )
+    rows.append(
+        [
+            common.btn(
+                f"{'✓ ' if key is current_style else ''}{label}",
+                "product",
+                f"style:{key.value}",
+                product.id,
+                style=normalize_style(key.value),
+            )
+            for key, label in (
+                (ButtonStyle.SUCCESS, "🟢 سبز"),
+                (ButtonStyle.DANGER, "🔴 قرمز"),
+            )
         ]
     )
     rows.append(
@@ -204,6 +256,7 @@ async def _show_product(target: CallbackQuery | Message, session: AsyncSession, 
             common.btn("🗄 آرشیو", "product", "archive", product.id),
         ]
     )
+    rows.append([common.btn("🗑 حذف کامل محصول", "product", "delete", product.id)])
     rows.append([common.back("catalog")])
     await common.reply(target, "\n".join(lines), rows)
 
@@ -345,6 +398,24 @@ async def product_router(
         return
 
     action = callback_data.action
+    if action.startswith("style:"):
+        try:
+            new_style = ButtonStyle(action.split(":", 1)[1].upper())
+        except ValueError:
+            await callback.answer("رنگ نامعتبر است", show_alert=True)
+            return
+        product.button_style = new_style
+        await common.audit(
+            session,
+            admin,
+            "catalog.product_button_style",
+            entity_type="product",
+            entity_id=product.id,
+            data={"style": new_style.value},
+        )
+        await callback.answer(f"رنگ دکمه: {BUTTON_STYLE_LABELS[new_style]}")
+        await _show_product(callback, session, admin, product.id)
+        return
     if action == "rename":
         await state.set_state(AdminStates.product_edit)
         await state.update_data(field="title", product_id=product.id)
@@ -384,6 +455,50 @@ async def product_router(
         await catalog_service.archive_product(session, product.id)
         await common.audit(session, admin, "catalog.product_archived", entity_type="product", entity_id=product.id)
         await callback.answer("آرشیو شد")
+        await _show_categories(callback, session, admin, 0)
+        return
+    elif action == "delete":
+        from sqlalchemy import func
+
+        from vpnbot.db.models.inventory import InventoryItem
+
+        stock_total = int(
+            (
+                await session.execute(
+                    select(func.count(InventoryItem.id)).where(InventoryItem.product_id == product.id)
+                )
+            ).scalar_one()
+        )
+        plan_total = len([p for p in product.plans if p.archived_at is None])
+        await callback.answer()
+        await common.reply(
+            callback,
+            f"<b>🗑 حذف کامل «{common.escape(product.title)}»</b>\n\n"
+            "این کار <b>برگشت‌ناپذیر</b> است:\n"
+            f"• {common.money(plan_total)} پلن حذف می‌شود\n"
+            f"• {common.money(stock_total)} ردیف موجودی (فروش‌نرفته) برای همیشه پاک می‌شود\n\n"
+            "اگر محصول سفارش ثبت‌شده یا موجودی تحویل‌شده داشته باشد، حذف انجام نمی‌شود "
+            "و باید آرشیوش کنید.\n\n"
+            "مطمئنید؟",
+            [common.yes_no("product", "delete_yes", product.id), [common.back("catalog")]],
+        )
+        return
+    elif action == "delete_yes":
+        try:
+            removed = await catalog_service.delete_product(session, product.id)
+        except catalog_service.CatalogError as exc:
+            await common.alert(callback, f"⚠️ {exc}")
+            await _show_product(callback, session, admin, product.id)
+            return
+        await common.audit(
+            session,
+            admin,
+            "catalog.product_deleted",
+            entity_type="product",
+            entity_id=product.id,
+            data={"title": product.title, **removed},
+        )
+        await callback.answer("محصول حذف شد")
         await _show_categories(callback, session, admin, 0)
         return
     await _show_product(callback, session, admin, product.id)

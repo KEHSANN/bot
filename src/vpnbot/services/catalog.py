@@ -197,6 +197,69 @@ async def archive_product(session: AsyncSession, product_id: int) -> Product:
     return product
 
 
+async def delete_product(session: AsyncSession, product_id: int) -> dict[str, int]:
+    """Permanently delete a product, its plans and its unsold stock.
+
+    Unlike archiving this is irreversible, so anything tied to a customer
+    blocks it (the caller should archive instead):
+
+    * any order referencing the product (order history must survive —
+      ``orders.product_id`` has no ON DELETE behaviour), and
+    * inventory that is RESERVED or DELIVERED (a customer's service).
+
+    AVAILABLE / DISABLED inventory rows are deleted with the product;
+    plans go through the existing ON DELETE CASCADE.
+    """
+    from vpnbot.db.models.orders import Order
+
+    product = await get_product(session, product_id)
+    if product is None:
+        raise CatalogError("محصول یافت نشد")
+
+    order_count = int(
+        (await session.execute(select(func.count(Order.id)).where(Order.product_id == product_id))).scalar_one()
+    )
+    if order_count:
+        raise CatalogError(
+            "این محصول سفارش ثبت‌شده دارد و حذف کامل آن ممکن نیست؛ به‌جای حذف، آرشیوش کنید."
+        )
+    live_count = int(
+        (
+            await session.execute(
+                select(func.count(InventoryItem.id)).where(
+                    InventoryItem.product_id == product_id,
+                    InventoryItem.status.in_([InventoryStatus.RESERVED, InventoryStatus.DELIVERED]),
+                )
+            )
+        ).scalar_one()
+    )
+    if live_count:
+        raise CatalogError(
+            "بخشی از موجودی این محصول رزرو یا تحویل شده است و حذف کامل آن ممکن نیست؛ آرشیوش کنید."
+        )
+
+    stock_count = int(
+        (
+            await session.execute(
+                select(func.count(InventoryItem.id)).where(InventoryItem.product_id == product_id)
+            )
+        ).scalar_one()
+    )
+    plans = list(product.plans)
+    plan_count = len(plans)
+    # Delete plans through the ORM: a bare ``session.delete(product)``
+    # would try to nullify plans.product_id first (the relationship has
+    # no delete cascade), which the NOT NULL column rejects.
+    for plan in plans:
+        await session.delete(plan)
+    await session.execute(
+        InventoryItem.__table__.delete().where(InventoryItem.product_id == product_id)
+    )
+    await session.delete(product)
+    await session.flush()
+    return {"plans": plan_count, "inventory": stock_count}
+
+
 async def duplicate_product(session: AsyncSession, product_id: int) -> Product:
     source = await get_product(session, product_id)
     if source is None:
@@ -210,6 +273,7 @@ async def duplicate_product(session: AsyncSession, product_id: int) -> Product:
         category_id=source.category_id,
         image_file_id=source.image_file_id,
         product_type=source.product_type,
+        button_style=source.button_style,
         specs=dict(source.specs or {}),
         is_active=False,
         sales_enabled=False,
