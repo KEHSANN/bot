@@ -1170,3 +1170,363 @@ def test_html_validator_rejects_stray_angle_brackets() -> None:
         else:
             raise AssertionError(f"stray bracket must be rejected: {text}")
 
+
+# --- Round 9: FSM bleed, cancel race, self-approval, caps, seed -------
+
+
+def _memory_state(session_key: str = "admin-fsm"):
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    storage = MemoryStorage()
+    from aiogram.fsm.storage.base import StorageKey
+
+    key = StorageKey(bot_id=1, chat_id=1, user_id=1, thread_id=None)
+    return FSMContext(storage=storage, key=key)
+
+
+async def test_home_button_clears_admin_fsm_state(monkeypatch) -> None:
+    """The ✖️ انصراف button routes to the dashboard home handler; it
+    used to leave payment_note armed, so the admin's next text message
+    APPROVED the payment they had just backed out of."""
+    from types import SimpleNamespace
+
+    from vpnbot.bot.handlers.admin import dashboard
+
+    async def _fake_dashboard(*a, **k):
+        return None
+
+    monkeypatch.setattr(dashboard, "show_dashboard", _fake_dashboard)
+    state = _memory_state()
+    from vpnbot.bot.states import AdminStates
+
+    await state.set_state(AdminStates.payment_note)
+    await state.set_data({"topup_id": 42})
+
+    callback = SimpleNamespace()
+    admin = SimpleNamespace(id=1)
+    await dashboard.home(
+        callback, SimpleNamespace(action=""), None, admin, state
+    )
+    assert await state.get_state() is None
+    assert await state.get_data() == {}
+
+
+async def test_payment_entry_replaces_fsm_data(monkeypatch, session) -> None:
+    """Entering approve for a payment after a top-up must not leave a
+    stale topup_id behind — approve_input checks topup_id first and
+    would approve the WRONG transaction."""
+    from types import SimpleNamespace
+
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.bot.handlers.admin import payments as payments_handlers
+    from vpnbot.bot.keyboards.callbacks import AdminCB
+    from vpnbot.db.enums import PaymentMethod
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services import topups as topup_service
+    from vpnbot.services.auth import bootstrap_owner
+    from vpnbot.services.settings import CARD_SETTINGS, SettingsService
+
+    admin = await bootstrap_owner(session, telegram_id=900000701)
+    await SettingsService(session).set(
+        CARD_SETTINGS,
+        {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
+    )
+    user = await make_user(session, telegram_id=900000702)
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 1, "fsmpay")
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    payment = await payment_service.start_payment(session, order=order, method=PaymentMethod.CARD)
+    topup = await topup_service.create_topup(
+        session, user_id=user.id, amount_irt=50000, method=PaymentMethod.CARD
+    )
+
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(payments_handlers, "_show_payment", _noop)
+    monkeypatch.setattr(payments_handlers, "_show_topup", _noop)
+
+    class _CB:
+        def __init__(self) -> None:
+            self.answered = False
+            self.chat = SimpleNamespace(id=1, type="private")
+            self.message = SimpleNamespace(
+                edit_text=self._noop, answer=self._noop
+            )
+            self.from_user = SimpleNamespace(id=1)
+            self.bot = SimpleNamespace(
+                send_photo=self._noop, send_document=self._noop,
+                send_message=self._noop,
+            )
+
+        async def _noop(self, *a, **k):
+            return None
+
+        async def answer(self, *a, **k):
+            self.answered = True
+
+    state = _memory_state()
+    from vpnbot.services.auth import get_admin
+
+    admin = await get_admin(session, 900000701)  # fresh, role loaded
+    await payments_handlers.topups_router(
+        _CB(), AdminCB(section="topups", action="approve", item_id=topup.id),
+        session, admin, state,
+    )
+    assert await state.get_data() == {"topup_id": topup.id}
+
+    await payments_handlers.payments_router(
+        _CB(), AdminCB(section="payments", action="approve", item_id=payment.id),
+        session, admin, state,
+    )
+    assert await state.get_data() == {"payment_id": payment.id}  # no stale topup_id
+
+
+async def test_cancel_order_race_and_attempt_guards(session) -> None:
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import (
+        DeliveryStatus,
+        InventoryStatus,
+        OrderStatus,
+        PaymentMethod,
+        PaymentStatus,
+    )
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services import wallet as wallet_service
+
+    user = await make_user(session, telegram_id=900000711)
+    await wallet_service.credit(
+        session, user_id=user.id, amount_irt=600_000, kind="TOPUP", key="race-topup"
+    )
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 1, "race")
+    from sqlalchemy import select as _select
+
+    from vpnbot.db.models.inventory import InventoryItem
+
+    item = (
+        await session.execute(
+            _select(InventoryItem).where(InventoryItem.product_id == product.id)
+        )
+    ).scalar_one()
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    await payment_service.pay_order_with_wallet(session, order=order, user_id=user.id)
+    balance_after_pay = await wallet_service.balance(session, user.id)
+
+    # 1) While the worker is mid-send (SENDING), cancel is refused.
+    order.delivery_status = DeliveryStatus.SENDING
+    await session.flush()
+    try:
+        await order_service.cancel_order(session, order.id, reason="x")
+    except order_service.OrderError:
+        pass
+    else:
+        raise AssertionError("cancel during SENDING must be refused")
+
+    # 2) After a recorded delivery attempt, cancel proceeds but the
+    # item is NOT returned to the pool and the wallet is NOT refunded.
+    order.delivery_status = DeliveryStatus.PENDING
+    await inventory_reserve(session, item, order)
+    from vpnbot.services import inventory as inventory_service
+
+    await inventory_service.log_attempt(
+        session, order_id=order.id, item_id=item.id,
+        outcome="FAILED", error_code="network lost after send",
+    )
+    await session.flush()
+    await order_service.cancel_order(session, order.id, reason="x")
+    assert order.status is OrderStatus.CANCELLED
+    await session.refresh(item)
+    assert item.status is InventoryStatus.RESERVED  # never resold
+    assert await wallet_service.balance(session, user.id) == balance_after_pay
+
+    # 3) A card order in review: cancelling also cancels its payment so
+    # it leaves the admin queue.
+    _, product2, plan2 = await make_catalog(session)
+    await _stock(session, product2, plan2, 1, "race2")
+    from vpnbot.services.settings import CARD_SETTINGS, SettingsService
+
+    await SettingsService(session).set(
+        CARD_SETTINGS,
+        {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
+    )
+    order2 = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan2.id, product=product2, plan=plan2
+    )
+    payment2 = await payment_service.start_payment(session, order=order2, method=PaymentMethod.CARD)
+    await payment_service.submit_card_receipt(
+        session, payment_id=payment2.id, user_id=user.id, file_id="r", file_type="photo"
+    )
+    await order_service.cancel_order(session, order2.id, reason="x")
+    await session.refresh(payment2)
+    assert payment2.status is PaymentStatus.CANCELLED
+
+
+async def inventory_reserve(session, item, order) -> None:
+    from vpnbot.db.enums import InventoryStatus
+    from vpnbot.db.models.inventory import InventoryAssignment
+
+    item.status = InventoryStatus.RESERVED
+    item.assigned_order_id = order.id
+    from vpnbot.db.base import utcnow
+
+    session.add(
+        InventoryAssignment(
+            inventory_item_id=item.id, order_id=order.id, user_id=order.user_id,
+            assigned_at=utcnow(),
+        )
+    )
+    await session.flush()
+
+
+async def test_self_approval_guard_for_non_owner_admins(session) -> None:
+    from sqlalchemy import select
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import PaymentMethod
+    from vpnbot.db.models.users import Admin, Role
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services.auth import bootstrap_owner, ensure_roles
+    from vpnbot.services.settings import CARD_SETTINGS, SettingsService
+
+    await ensure_roles(session)
+    owner = await bootstrap_owner(session, telegram_id=900000721)
+    await SettingsService(session).set(
+        CARD_SETTINGS,
+        {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
+    )
+    # A finance admin who is ALSO a customer with their own user row.
+    dual = await make_user(session, telegram_id=900000722)
+    finance_role = (
+        await session.execute(select(Role).where(Role.key == "finance"))
+    ).scalar_one()
+    finance_admin = Admin(user_id=dual.id, role_id=finance_role.id, is_active=True)
+    session.add(finance_admin)
+    await session.flush()
+
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 1, "selfappr")
+    order = await order_service.create_order(
+        session, user_id=dual.id, plan_id=plan.id, product=product, plan=plan
+    )
+    payment = await payment_service.start_payment(session, order=order, method=PaymentMethod.CARD)
+    await payment_service.submit_card_receipt(
+        session, payment_id=payment.id, user_id=dual.id, file_id="fake", file_type="photo"
+    )
+    try:
+        await payment_service.approve_payment(session, payment_id=payment.id, admin_id=finance_admin.id)
+    except payment_service.PaymentError:
+        pass
+    else:
+        raise AssertionError("a finance admin must not approve their own payment")
+    # The owner CAN approve it.
+    await payment_service.approve_payment(session, payment_id=payment.id, admin_id=owner.id)
+
+
+async def test_wallet_admin_decrease_path_and_open_caps(session) -> None:
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import LedgerKind, PaymentMethod
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import topups as topup_service
+    from vpnbot.services import wallet as wallet_service
+    from vpnbot.services.settings import CARD_SETTINGS, SettingsService
+
+    user = await make_user(session, telegram_id=900000731)
+    # The exact call the admin panel makes for a decrease (round-9 #5:
+    # without allow_negative it always raised).
+    await wallet_service.credit(
+        session, user_id=user.id, amount_irt=100_000, kind=LedgerKind.TOPUP, key="cap-topup"
+    )
+    await wallet_service.apply(
+        session, user_id=user.id, amount_irt=-40_000, kind=LedgerKind.ADMIN_ADJUSTMENT,
+        idempotency_key="cap-adj", allow_negative=True,
+    )
+    assert await wallet_service.balance(session, user.id) == 60_000
+
+    # Open-order cap: three concurrent unpaid orders, the fourth fails.
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 5, "caps")
+    for _ in range(3):
+        await order_service.create_order(
+            session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+        )
+    try:
+        await order_service.create_order(
+            session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+        )
+    except order_service.OrderError:
+        pass
+    else:
+        raise AssertionError("4th concurrent open order must be refused")
+
+    await SettingsService(session).set(
+        CARD_SETTINGS,
+        {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
+    )
+    for _ in range(3):
+        await topup_service.create_topup(
+            session, user_id=user.id, amount_irt=50_000, method=PaymentMethod.CARD
+        )
+    try:
+        await topup_service.create_topup(
+            session, user_id=user.id, amount_irt=50_000, method=PaymentMethod.CARD
+        )
+    except topup_service.TopUpError:
+        pass
+    else:
+        raise AssertionError("4th concurrent open top-up must be refused")
+
+
+async def test_seed_defaults_never_overwrites(session) -> None:
+    from vpnbot.services.settings import CARD_SETTINGS, SettingsService
+
+    service = SettingsService(session)
+    await service.set(CARD_SETTINGS, {"card_number": "6037-9999", "enabled": True})
+    await service.seed_defaults()
+    after = await service.get(CARD_SETTINGS)
+    assert after["card_number"] == "6037-9999"  # the admin's value survives re-seeding
+
+
+async def test_referral_three_cycle_and_small_order(session) -> None:
+    from tests.factories import make_user
+
+    from vpnbot.db.enums import OrderStatus
+    from vpnbot.db.models.orders import Order
+    from vpnbot.services import referrals as referral_service
+    from vpnbot.services.auth import bind_referral
+
+    a = await make_user(session, telegram_id=900000741)
+    b = await make_user(session, telegram_id=900000742)
+    c = await make_user(session, telegram_id=900000743)
+    assert await bind_referral(session, user=b, code=a.referral_code)
+    assert await bind_referral(session, user=c, code=b.referral_code)
+    # C inviting A would close a 3-cycle — refused.
+    assert not await bind_referral(session, user=a, code=c.referral_code)
+    await session.refresh(a)
+    assert a.referred_by_id is None
+
+    # An order cheaper than the tier-1 reward generates no reward.
+    from tests.factories import make_catalog
+
+    _, product3, plan3 = await make_catalog(session)
+    cheap = Order(
+        user_id=b.id, product_id=product3.id, plan_id=plan3.id,
+        public_id="TEST-CHEAP-1",
+        product_title_snapshot="x", plan_title_snapshot=None,
+        unit_price_irt=10_000, total_irt=10_000, status=OrderStatus.FULFILLMENT_PENDING,
+    )
+    session.add(cheap)
+    await session.flush()
+    assert await referral_service.grant_for_paid_order(session, cheap) == []
+
