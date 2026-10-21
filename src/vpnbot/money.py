@@ -10,6 +10,7 @@ Canonical internal unit: **Iranian Toman (IRT), integer**.
 
 from __future__ import annotations
 
+import html
 from decimal import Decimal, InvalidOperation
 
 PERSIAN_DIGITS = "۰۱۲۳۴۵۶۷۸۹"
@@ -63,7 +64,9 @@ def parse_amount_irt(raw: str) -> int:
     try:
         value = Decimal(text)
     except InvalidOperation as exc:
-        raise MoneyError(f"مبلغ نامعتبر است: {raw!r}") from exc
+        # The raw input goes into a bot message rendered as HTML —
+        # escape it, or an amount like "5<0" breaks the reply itself.
+        raise MoneyError(f"مبلغ نامعتبر است: {html.escape(raw)!r}") from exc
     if value != value.to_integral_value():
         raise MoneyError("مبلغ باید عدد صحیح باشد؛ لطفاً بدون اعشار وارد کنید")
     if value < 0:

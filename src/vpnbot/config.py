@@ -50,9 +50,9 @@ class Settings(BaseSettings):
     environment: Literal["development", "test", "production"] = "production"
     log_level: str = "INFO"
     log_json: bool = True
-    api_host: str = "0.0.0.0"  # noqa: S104 - container listener, not public
+    api_host: str = "127.0.0.1"  # loopback by default; Docker Compose sets 0.0.0.0 inside the container
     api_port: int = 8080
-    health_host: str = "0.0.0.0"  # noqa: S104 - probe listener, not public
+    health_host: str = "127.0.0.1"  # loopback by default; Docker Compose sets 0.0.0.0 inside the container
     health_port: int = 8081
 
     # Limits / feature flags
@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     referral_tier2_threshold: int = 5
     referral_tier2_reward_irt: int = 10_000
     broadcast_rate_per_second: int = 20
-    payment_review_ttl_hours: int = 48
+    payment_review_ttl_hours: int = 6
 
     @field_validator("bot_token")
     @classmethod

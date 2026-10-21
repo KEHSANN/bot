@@ -151,7 +151,14 @@ async def cmd_run(_: argparse.Namespace) -> int:
     settings = get_settings()
     factory = get_session_factory()
     bot = Bot(settings.bot_token, default=bot_properties())
-    dp = build_dispatcher(settings, factory)
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    from vpnbot.bot.app import build_storage, storage_is_alive
+
+    storage = build_storage(settings)
+    if storage is not None and not await storage_is_alive(storage):
+        storage = MemoryStorage()
+    dp = build_dispatcher(settings, factory, storage=storage)
 
     health_task, health_server = await _serve_health(settings, create_app(settings, factory))
     try:

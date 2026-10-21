@@ -143,15 +143,19 @@ def _find_header(header: list[str], kind: str) -> int | None:
 
 
 def _split_line(text: str) -> tuple[str, str]:
-    for sep in _SEPARATORS:
+    # Split ONLY when the right-hand side actually looks like a
+    # subscription URL. Config URIs themselves routinely contain the
+    # separators — "alpn=h2,http/1.1" has a comma, server names like
+    # "#Germany | VIP" have a pipe — and the old split-on-sight rule
+    # fed the tail to _record as a "subscription link" that then
+    # failed the http(s) check, rejecting perfectly valid single
+    # configs.
+    for sep in (*_SEPARATORS, ","):
         if sep in text:
             config, _, rest = text.partition(sep)
             sub = rest.split(sep, 1)[0].strip()
-            return config.strip(), sub
-    # fall back to comma only when it splits into exactly two non-empty cells
-    if text.count(",") == 1:
-        left, right = text.split(",", 1)
-        return left.strip(), right.strip()
+            if sub.lower().startswith(("http://", "https://")):
+                return config.strip(), sub
     return text.strip(), ""
 
 

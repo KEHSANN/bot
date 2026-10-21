@@ -182,13 +182,17 @@ class ScreenSender:
         extra_rows: Sequence[Sequence[InlineKeyboardButton]] | None = None,
     ) -> bool:
         messages = screen.messages[1:] if skip_first else screen.messages
+        slept = 0.0  # cumulative delay budget for this screen send
         try:
             for index, msg in enumerate(messages):
                 # Cap at send time too: screens stored before the 3s
-                # validation cap may still carry a 10s delay.
+                # validation cap may still carry a 10s delay. The cap
+                # is also cumulative — ten messages x 3s would hold the
+                # caller's DB connection for half a minute otherwise.
                 delay = min(int(msg.get("delay_ms", 0) or 0), 3000) / 1000
-                if delay > 0:
+                if delay > 0 and slept < 6.0:
                     await asyncio.sleep(delay)
+                    slept += delay
                 last = index == len(messages) - 1
                 markup = _markup(screen, extra_rows) if last else None
                 # Retry THIS message on a rate limit, not the whole screen:

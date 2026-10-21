@@ -16,7 +16,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vpnbot.db.enums import LedgerKind, OrderStatus, PaymentStatus, RewardStatus
@@ -114,30 +113,58 @@ async def _issue(
 ) -> RewardGrant | None:
     if amount <= 0:
         return None
-    reward = ReferralReward(
-        inviter_id=inviter_id,
-        referred_user_id=referred_user_id,
-        qualifying_order_id=order_id,
-        tier=tier,
-        amount_irt=amount,
-        status=RewardStatus.ISSUED,
-    )
-    session.add(reward)
-    try:
-        # Savepoint, NOT session.rollback(): this runs inside the caller's
-        # transaction (fulfilment has already marked the order delivered).
-        # A full rollback on a duplicate grant undid the delivery writes
-        # while the config had already been sent to the customer.
-        async with session.begin_nested():
-            await session.flush()
-    except IntegrityError:
-        return None  # already granted for this invitee/tier
+    # Insert atomically with ON CONFLICT DO NOTHING instead of
+    # add()+flush inside a savepoint: when the unique rule fired, the
+    # failed flush poisoned the caller's transaction
+    # (PendingRollbackError) even though the IntegrityError was
+    # caught — and fulfilment then failed after the config was sent.
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    values = {
+        "inviter_id": inviter_id,
+        "referred_user_id": referred_user_id,
+        "qualifying_order_id": order_id,
+        "tier": tier,
+        "amount_irt": amount,
+        "status": RewardStatus.ISSUED,
+    }
+    if tier == 1:
+        stmt = (
+            pg_insert(ReferralReward.__table__)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["referred_user_id", "tier"])
+            .returning(ReferralReward.id)
+        )
+    else:
+        stmt = (
+            pg_insert(ReferralReward.__table__)
+            .values(**values)
+            .on_conflict_do_nothing(
+                index_elements=["inviter_id"],
+                index_where=ReferralReward.tier == 2,
+            )
+            .returning(ReferralReward.id)
+        )
+    reward_id = (await session.execute(stmt)).scalar_one_or_none()
+    if reward_id is None:
+        return None  # already granted (the unique rule fired, no error)
+    reward = await session.get(ReferralReward, reward_id)
     result = await wallet_service.credit(
         session,
         user_id=inviter_id,
         amount_irt=amount,
         kind=LedgerKind.REFERRAL_REWARD,
-        key=f"referral:{referred_user_id}:tier{tier}",
+        # Tier 1 is once per invitee; tier 2 is once per INVITER. The
+        # key must follow the same scope as the rule: keyed by the
+        # invitee, two concurrent tier-2 grants for one inviter (two
+        # invitees' orders fulfilled in the same worker batch) used
+        # different keys and both credited. The partial unique index
+        # uq_reward_inviter_tier2 backs the row side of the same rule.
+        key=(
+            f"referral:{referred_user_id}:tier{tier}"
+            if tier == 1
+            else f"referral:inviter:{inviter_id}:tier2"
+        ),
         reason=f"پاداش دعوت سطح {tier}",
         ref_type="order",
         ref_id=str(order_id),

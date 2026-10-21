@@ -39,4 +39,13 @@ class ReferralReward(Base):
     __table_args__ = (
         # A referred customer can generate at most one reward per tier, ever.
         sa.UniqueConstraint("referred_user_id", "tier", name="uq_reward_referred_tier"),
+        # Tier 2 is once per INVITER (migration f6d94b3a8c21): under
+        # concurrent fulfilment, the count-based check alone raced and
+        # paid it several times.
+        sa.Index(
+            "uq_reward_inviter_tier2",
+            "inviter_id",
+            unique=True,
+            postgresql_where=sa.text("tier = 2"),
+        ),
     )

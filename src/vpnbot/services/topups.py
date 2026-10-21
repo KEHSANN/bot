@@ -55,6 +55,24 @@ async def create_topup(
         raise TopUpError(f"حداقل مبلغ شارژ {format_irt_plain(minimum)} تومان است")
     if amount_irt <= 0:
         raise TopUpError("مبلغ معتبر نیست")
+    # Abandoned top-ups (amount chosen, method tapped, then /cancel or
+    # a menu detour) used to sit in AWAITING_PAYMENT_DETAILS until the
+    # review TTL and — counting toward the open cap below — locked the
+    # customer out of topping up at all. A fresh request supersedes
+    # them: evidence was never submitted for an AWAITING top-up, so
+    # cancelling it loses nothing. PENDING_REVIEW ones are untouched
+    # (the admin owes those a decision).
+    stale = (
+        await session.execute(
+            select(WalletTopUp).where(
+                WalletTopUp.user_id == user_id,
+                WalletTopUp.status == PaymentStatus.AWAITING_PAYMENT_DETAILS,
+            )
+        )
+    ).scalars()
+    for old in stale:
+        old.status = PaymentStatus.CANCELLED
+    await session.flush()
     # Anti-spam cap, mirroring orders: unlimited open top-ups would let
     # one account flood the review queue and the admins' chats.
     open_topups = int(
