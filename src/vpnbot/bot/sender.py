@@ -255,21 +255,41 @@ class ScreenSender:
 
     @staticmethod
     async def _log(snapshot: ScreenSnapshot, telegram_id: int, ok: bool) -> None:
+        # Best-effort audit log on its OWN session (it must survive a
+        # caller rollback) — but bounded: at most a few concurrent log
+        # writes, each with a short timeout, so under load the log
+        # drops entries instead of piling onto the connection pool
+        # the handlers are already holding sessions from.
+        import asyncio
+
+        semaphore = getattr(ScreenSender, "_log_semaphore", None)
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(4)
+            ScreenSender._log_semaphore = semaphore  # type: ignore[attr-defined]
+        if semaphore.locked():
+            return
         try:
-            session_factory = getattr(ScreenSender, "_log_factory", None)
-            if session_factory is None:
-                return
-            async with session_factory() as session, session.begin():
-                session.add(
-                    MessageDispatchLog(
-                        stage=snapshot.stage,
-                        user_telegram_id=int(telegram_id),
-                        version=snapshot.version,
-                        outcome="SENT" if ok else "FAILED",
-                    )
+            async with semaphore:
+                await asyncio.wait_for(
+                    ScreenSender._write_log(snapshot, telegram_id, ok), timeout=2.0
                 )
         except Exception:  # noqa: BLE001 - logging must never break delivery
-            log.debug("dispatch log write failed", exc_info=True)
+            log.debug("dispatch log write skipped/failed", exc_info=True)
+
+    @staticmethod
+    async def _write_log(snapshot: ScreenSnapshot, telegram_id: int, ok: bool) -> None:
+        session_factory = getattr(ScreenSender, "_log_factory", None)
+        if session_factory is None:
+            return
+        async with session_factory() as session, session.begin():
+            session.add(
+                MessageDispatchLog(
+                    stage=snapshot.stage,
+                    user_telegram_id=int(telegram_id),
+                    version=snapshot.version,
+                    outcome="SENT" if ok else "FAILED",
+                )
+            )
 
 
 def attach_log_factory(sender_cls, session_factory) -> None:

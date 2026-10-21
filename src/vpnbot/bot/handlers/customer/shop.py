@@ -90,7 +90,7 @@ async def _show_products(
     products, total = await catalog_service.list_products(
         session,
         category_id=category_id or None,
-        offset=max(0, page) * PRODUCT_PAGE_SIZE,
+        offset=min(max(0, page), 100_000) * PRODUCT_PAGE_SIZE,
         limit=PRODUCT_PAGE_SIZE,
     )
     total_pages = max(1, (total + PRODUCT_PAGE_SIZE - 1) // PRODUCT_PAGE_SIZE)

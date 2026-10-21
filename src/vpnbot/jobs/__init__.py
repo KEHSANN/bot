@@ -4,6 +4,6 @@
 one-shot variant the CLI uses before a deploy.
 """
 
-from vpnbot.jobs.worker import RateLimiter, Worker, sweep_expired_payments_once
+from vpnbot.jobs.worker import RateLimiter, Worker, sweep_all_once, sweep_expired_payments_once
 
-__all__ = ["RateLimiter", "Worker", "sweep_expired_payments_once"]
+__all__ = ["RateLimiter", "Worker", "sweep_all_once", "sweep_expired_payments_once"]

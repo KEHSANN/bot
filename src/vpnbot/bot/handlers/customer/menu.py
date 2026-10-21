@@ -86,8 +86,23 @@ async def cmd_start(
     command: CommandObject,
     state: FSMContext,
 ) -> None:
-    await state.clear()
     if message.chat.type != "private" or user is None:
+        await state.clear()
+        return
+    # Abandoning via /start cancels the state-bound unpaid order too
+    # (same helper as /cancel): /start used to only clear state, so
+    # the order kept a cap slot until its TTL — and the wallet screen
+    # even tells users to send /start to cancel.
+    await cancel_open_order_from_state(session, user, state)
+    await state.clear()
+
+    sender: ScreenSender = sender_for(message.bot, session)
+    if not user.is_active:
+        # Blocked users get the blocked screen and NOTHING else: the
+        # referral bind used to run before this check, so a blocked
+        # account could still attribute referrals (and lock the
+        # inviter's row) by spamming /start.
+        await sender.show(message, STAGE_BLOCKED)
         return
 
     code = _referral_from_start(command.args)
@@ -103,18 +118,16 @@ async def cmd_start(
             if bound:
                 log.info("referral attributed: user=%s inviter_code=%s", user.id, code)
 
-    sender: ScreenSender = sender_for(message.bot, session)
-    if not user.is_active:
-        await sender.show(message, STAGE_BLOCKED)
-        return
     await sender.show(message, STAGE_MAIN_MENU, base_context(user))
 
 
 @router.message(Command("menu", "cancel"))
 async def cmd_menu(message: Message, session: AsyncSession, user: User | None, state: FSMContext) -> None:
-    await state.clear()
     if message.chat.type != "private" or user is None:
+        await state.clear()
         return
+    await cancel_open_order_from_state(session, user, state)
+    await state.clear()
     sender = sender_for(message.bot, session)
     await sender.show(message, STAGE_MAIN_MENU, base_context(user))
 

@@ -58,11 +58,6 @@ class Settings(BaseSettings):
     # Limits / feature flags
     max_import_file_bytes: int = 5 * 1024 * 1024
     max_import_records: int = 20_000
-    wallet_enabled: bool = True
-    referral_enabled: bool = True
-    referral_reward_irt: int = 20_000
-    referral_tier2_threshold: int = 5
-    referral_tier2_reward_irt: int = 10_000
     broadcast_rate_per_second: int = 20
     payment_review_ttl_hours: int = 6
 

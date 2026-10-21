@@ -110,11 +110,17 @@ async def cmd_seed(_: argparse.Namespace) -> int:
 
 
 async def cmd_sweep(_: argparse.Namespace) -> int:
-    from vpnbot.db.session import get_session_factory
-    from vpnbot.jobs import sweep_expired_payments_once
+    from vpnbot.db.session import dispose_engine, get_session_factory
+    from vpnbot.jobs import sweep_all_once
 
-    expired = await sweep_expired_payments_once(get_session_factory())
-    print(f"expired payments: {expired}")
+    try:
+        result = await sweep_all_once(get_session_factory())
+    finally:
+        await dispose_engine()
+    print(
+        f"expired payments: {result['payments']}, topups: {result['topups']}, "
+        f"orders: {result['orders']}"
+    )
     return 0
 
 

@@ -13,7 +13,7 @@ import logging
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vpnbot.bot.handlers.customer.common import alert, base_context, money, sender_for
@@ -252,6 +252,10 @@ async def buy_with_wallet(
             await alert(callback, "این محصول در دسترس نیست")
             return
         order, _plan = resolved
+        # A fresh wallet preview supersedes the customer's other
+        # payment-less previews, so browsing prices can never exhaust
+        # the open-order cap on its own.
+        await order_service.cancel_preview_orders(session, user_id=user.id, keep_order_id=order.id)
         # Bind the order in FSM state too (not only in the confirm
         # button): /cancel and the menu cancel can then cancel this
         # exact order instead of leaving it to the TTL sweep.
@@ -351,6 +355,19 @@ async def resume_checkout(
     if order.payment is not None and order.payment.status is PaymentStatus.PENDING_REVIEW:
         await alert(callback, "فیش این سفارش در حال بررسی است؛ منتظر نتیجه بمانید")
         return
+    plan = await catalog_service.get_plan(session, order.plan_id)
+    if plan is None or not plan.is_on_sale:
+        await alert(callback, "این پلن دیگر در دسترس نیست")
+        return
+    if plan.price_irt != order.total_irt:
+        # The checkout screen would show the order's snapshot price
+        # while the flow underneath charges the plan's current one.
+        # Refuse the stale resume; a fresh buy shows the real price.
+        await alert(
+            callback,
+            "قیمت این پلن تغییر کرده است؛ لطفاً از فروشگاه دوباره خرید کنید",
+        )
+        return
     await state.clear()
     await state.update_data(order_id=order.id, plan_id=order.plan_id, order_ref=order.public_id)
     await callback.answer()
@@ -364,6 +381,18 @@ async def resume_checkout(
             price=money(order.total_irt),
         ),
     )
+    # The resume screen is screen-driven (card/crypto buttons); the
+    # wallet option is code-side, so offer it as a follow-up message
+    # bound to this plan (the ask flow reuses this very order).
+    from vpnbot.bot.handlers.customer.shop import _wallet_buy_row
+
+    wallet_row = await _wallet_buy_row(session, user, plan.id)
+    message = callback.message
+    if wallet_row is not None and isinstance(message, Message):
+        await message.answer(
+            "یا همین سفارش را با کیف پول پرداخت کنید:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[wallet_row]),
+        )
 
 
 @router.callback_query(MenuCB.filter(F.action == "paycrypto"))
