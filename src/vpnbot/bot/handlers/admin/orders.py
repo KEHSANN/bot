@@ -208,6 +208,10 @@ async def orders_router(
 ) -> None:
     admin = common.guard(admin, Permission.ORDER_VIEW)
     action = callback_data.action
+    # Navigating in this section abandons any half-finished wizard
+    # (see the note in the payments router): flow entries re-set
+    # their state after this clear.
+    await state.clear()
 
     if action == "view":
         await _show_order(callback, session, admin, callback_data.item_id)

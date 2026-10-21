@@ -316,6 +316,10 @@ async def catalog_router(
 ) -> None:
     admin = common.guard(admin, Permission.PRODUCT_MANAGE)
     action = callback_data.action
+    if action == "products":
+        # Section entry point only: pick_cat / pick_type below are
+        # mid-wizard steps that consume the draft in FSM data.
+        await state.clear()
 
     if action == "products":
         await _show_products(callback, session, admin, callback_data.item_id, callback_data.page)
@@ -392,6 +396,7 @@ async def product_router(
     state: FSMContext,
 ) -> None:
     admin = common.guard(admin, Permission.PRODUCT_MANAGE)
+    await state.clear()  # section navigation abandons other wizards
     product = await catalog_service.get_product(session, callback_data.item_id)
     if product is None:
         await callback.answer("محصول یافت نشد", show_alert=True)
@@ -514,6 +519,7 @@ async def plans_router(
 ) -> None:
     admin = common.guard(admin, Permission.PRODUCT_MANAGE)
     if callback_data.action != "new":
+        await state.clear()
         await _show_product(callback, session, admin, callback_data.item_id)
         return
     await state.set_state(AdminStates.plan_create)
@@ -535,6 +541,7 @@ async def plan_router(
     state: FSMContext,
 ) -> None:
     admin = common.guard(admin, Permission.PRODUCT_MANAGE)
+    await state.clear()  # section navigation abandons other wizards
     plan = await catalog_service.get_plan(session, callback_data.item_id)
     if plan is None:
         await callback.answer("پلن یافت نشد", show_alert=True)

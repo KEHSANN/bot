@@ -161,6 +161,10 @@ async def admins_router(
 ) -> None:
     admin = common.guard(admin, Permission.ADMIN_MANAGE)
     action = callback_data.action
+    # Navigating in this section abandons any half-finished wizard
+    # (see the note in the payments router): flow entries re-set
+    # their state after this clear.
+    await state.clear()
 
     if action == "new":
         await state.set_state(AdminStates.admin_grant)

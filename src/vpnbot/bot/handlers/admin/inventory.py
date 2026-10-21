@@ -7,6 +7,7 @@ Secrets are masked in lists. Revealing one requires ``inventory.view_secret``
 from __future__ import annotations
 
 from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -182,10 +183,18 @@ async def _show_item(
 
 @router.callback_query(AdminCB.filter(F.section == "inventory"))
 async def inventory_router(
-    callback: CallbackQuery, callback_data: AdminCB, session: AsyncSession, admin: Admin | None
+    callback: CallbackQuery,
+    callback_data: AdminCB,
+    session: AsyncSession,
+    admin: Admin | None,
+    state: FSMContext,
 ) -> None:
     admin = common.guard(admin, Permission.INVENTORY_MANAGE)
     action = callback_data.action
+    # Navigating in this section abandons any half-finished wizard
+    # (see the note in the payments router): flow entries re-set
+    # their state after this clear.
+    await state.clear()
 
     if action == "reveal" or action == "reveal_sub":
         common.guard(admin, Permission.INVENTORY_VIEW_SECRET)

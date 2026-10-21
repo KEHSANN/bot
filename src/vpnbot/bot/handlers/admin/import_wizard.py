@@ -35,8 +35,12 @@ router = Router(name="admin.import")
 
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_RECORDS = 20_000
-PREVIEW_TTL = 30 * 60
-PREVIEW_CAPACITY = 32
+# Raw uploaded configs sit in RAM until confirmed. The old bounds
+# (32 previews x up to 5MB, 30 minutes) let repeated uploads pin
+# hundreds of MB and OOM the container; an admin only ever needs
+# their latest preview, briefly.
+PREVIEW_TTL = 300
+PREVIEW_CAPACITY = 5
 
 MODE_LABELS = {
     import_service.ImportMode.SKIP_INVALID: "رد کردن رکوردهای نامعتبر",
@@ -57,6 +61,10 @@ _PREVIEWS: OrderedDict[str, _Cached] = OrderedDict()
 
 
 def _cache(token: str, item: _Cached) -> None:
+    # One live preview per admin: a new upload replaces the admin's
+    # previous one instead of accumulating alongside it.
+    for old_token in [t for t, c in _PREVIEWS.items() if c.admin_id == item.admin_id]:
+        del _PREVIEWS[old_token]
     _PREVIEWS[token] = item
     _PREVIEWS.move_to_end(token)
     while len(_PREVIEWS) > PREVIEW_CAPACITY:
