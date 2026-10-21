@@ -57,6 +57,7 @@ TABLES = (
     "referral_rewards",
     "ledger_entries",
     "wallet_accounts",
+    "wallet_topups",
     "broadcast_recipients",
     "broadcast_campaigns",
     "ticket_messages",

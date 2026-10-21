@@ -672,3 +672,379 @@ async def test_blocked_user_middleware_drops_everything_but_start() -> None:
     assert await middleware(handler, msg("سلام"), {"user": active, "admin": None}) == "handled"
     assert len(calls) == 4
 
+
+async def _stock(session, product, plan, count: int, tag: str) -> None:
+    """Direct AVAILABLE inventory rows (fake cipher values; stock only)."""
+    from vpnbot.db.enums import InventoryStatus
+    from vpnbot.db.models.inventory import InventoryItem
+
+    for i in range(count):
+        session.add(
+            InventoryItem(
+                product_id=product.id, plan_id=plan.id, config_cipher="c",
+                config_fingerprint=f"fp-{tag}-{i}", status=InventoryStatus.AVAILABLE,
+            )
+        )
+    await session.flush()
+
+
+async def _crypto_settings(session) -> None:
+    from vpnbot.services.settings import CRYPTO_SETTINGS, SettingsService
+
+    await SettingsService(session).set(
+        CRYPTO_SETTINGS,
+        {"enabled": True, "asset": "USDT", "network": "TRC20",
+         "address": "TAddr", "instructions": "بفرست"},
+    )
+
+
+async def test_txid_cannot_cross_between_topup_and_order(session) -> None:
+    """SEC-01/05: one TXID funds exactly one thing across BOTH tables,
+    in any letter case; stored form is canonical lowercase."""
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import PaymentMethod
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services import topups as topup_service
+
+    await _crypto_settings(session)
+    user = await make_user(session, telegram_id=900000501)
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 3, "txid-x")
+
+    txid = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789"
+    topup = await topup_service.create_topup(
+        session, user_id=user.id, amount_irt=50000, method=PaymentMethod.CRYPTO
+    )
+    await topup_service.submit_crypto_evidence(
+        session, topup_id=topup.id, user_id=user.id, txid=txid
+    )
+    assert topup.txid == txid.lower()  # canonical storage
+
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    payment = await payment_service.start_payment(
+        session, order=order, method=PaymentMethod.CRYPTO
+    )
+    try:
+        await payment_service.submit_crypto_evidence(
+            session, payment_id=payment.id, user_id=user.id, txid=txid.lower()
+        )
+    except payment_service.PaymentError:
+        pass
+    else:
+        raise AssertionError("a TXID used for a top-up must not fund an order")
+
+    # And the mirror direction: order first, top-up second.
+    txid2 = "1111222233334444555566667777888899990000aaaabbbbccccddddeeee"
+    order2 = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    payment2 = await payment_service.start_payment(
+        session, order=order2, method=PaymentMethod.CRYPTO
+    )
+    await payment_service.submit_crypto_evidence(
+        session, payment_id=payment2.id, user_id=user.id, txid=txid2.upper()
+    )
+    topup2 = await topup_service.create_topup(
+        session, user_id=user.id, amount_irt=50000, method=PaymentMethod.CRYPTO
+    )
+    try:
+        await topup_service.submit_crypto_evidence(
+            session, topup_id=topup2.id, user_id=user.id, txid=txid2
+        )
+    except topup_service.TopUpError:
+        pass
+    else:
+        raise AssertionError("a TXID used for an order must not fund a top-up")
+
+    # Garbage formats are refused outright.
+    try:
+        await payment_service.submit_crypto_evidence(
+            session, payment_id=payment.id, user_id=user.id, txid="not a txid!!"
+        )
+    except payment_service.PaymentError:
+        pass
+    else:
+        raise AssertionError("free-form text must not pass as a TXID")
+
+
+async def test_rejected_payment_frees_its_txid(session) -> None:
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import PaymentMethod
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services.auth import bootstrap_owner
+
+    await _crypto_settings(session)
+    admin = await bootstrap_owner(session, telegram_id=900000511)
+    user = await make_user(session, telegram_id=900000512)
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 2, "txid-free")
+    txid = "aaaa5555aaaa5555aaaa5555aaaa5555aaaa5555aaaa5555aaaa5555aaaa5555"
+
+    async def _submit():
+        order = await order_service.create_order(
+            session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+        )
+        payment = await payment_service.start_payment(
+            session, order=order, method=PaymentMethod.CRYPTO
+        )
+        await payment_service.submit_crypto_evidence(
+            session, payment_id=payment.id, user_id=user.id, txid=txid
+        )
+        return payment
+
+    first = await _submit()
+    await payment_service.reject_payment(
+        session, payment_id=first.id, admin_id=admin.id, reason="رسید ناخوانا"
+    )
+    assert first.txid is None  # freed, but kept in the audit trail
+    second = await _submit()  # the same real transfer can be resubmitted
+    assert second.txid == txid
+
+    # The customer is actually notified about the rejection now.
+    from sqlalchemy import select
+
+    from vpnbot.db.models.system import Job
+
+    jobs = (await session.execute(select(Job))).scalars().all()
+    texts = [str(j.payload.get("text", "")) for j in jobs if isinstance(j.payload, dict)]
+    assert any("رد شد" in t and "رسید ناخوانا" in t for t in texts)
+
+
+def test_amount_cap_blocks_bigint_overflow() -> None:
+    from vpnbot.money import MAX_AMOUNT_IRT, MoneyError, parse_amount_irt
+
+    assert parse_amount_irt(str(MAX_AMOUNT_IRT)) == MAX_AMOUNT_IRT
+    for raw in (str(MAX_AMOUNT_IRT + 1), "99999999999999999999999999", "1e30"):
+        try:
+            parse_amount_irt(raw)
+        except MoneyError:
+            pass
+        else:
+            raise AssertionError(f"{raw} must be refused by the amount cap")
+
+
+async def test_mutual_referral_is_blocked(session) -> None:
+    from tests.factories import make_user
+
+    from vpnbot.services import auth as auth_service
+
+    a = await make_user(session, telegram_id=900000521)
+    b = await make_user(session, telegram_id=900000522)
+    assert await auth_service.bind_referral(session, b, a.referral_code) is True
+    assert await auth_service.bind_referral(session, a, b.referral_code) is False
+    assert a.referred_by_id is None
+
+
+async def test_expiry_skips_pending_review_and_cancels_order(session) -> None:
+    from datetime import timedelta
+
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.base import utcnow
+    from vpnbot.db.enums import OrderStatus, PaymentMethod, PaymentStatus
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services import topups as topup_service
+    from vpnbot.services.settings import CARD_SETTINGS, SettingsService
+
+    await SettingsService(session).set(
+        CARD_SETTINGS,
+        {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
+    )
+    user = await make_user(session, telegram_id=900000531)
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 2, "expiry")
+
+    async def _order_with_payment(*, submit: bool):
+        order = await order_service.create_order(
+            session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+        )
+        payment = await payment_service.start_payment(
+            session, order=order, method=PaymentMethod.CARD
+        )
+        if submit:
+            await payment_service.submit_card_receipt(
+                session, payment_id=payment.id, user_id=user.id,
+                file_id="rcpt", file_type="photo",
+            )
+        payment.expires_at = utcnow() - timedelta(hours=1)
+        await session.flush()
+        return order, payment
+
+    stale_order, stale_payment = await _order_with_payment(submit=False)
+    paid_order, paid_payment = await _order_with_payment(submit=True)
+    topup = await topup_service.create_topup(
+        session, user_id=user.id, amount_irt=50000, method=PaymentMethod.CARD
+    )
+    topup.expires_at = utcnow() - timedelta(hours=1)
+    await session.flush()
+
+    assert await payment_service.expire_stale_payments(session) == 1
+    assert await topup_service.expire_stale_topups(session) == 1
+    assert stale_payment.status is PaymentStatus.EXPIRED
+    assert stale_order.status is OrderStatus.CANCELLED
+    # Money already sent by a customer never auto-expires.
+    assert paid_payment.status is PaymentStatus.PENDING_REVIEW
+    assert paid_order.status is OrderStatus.PENDING_PAYMENT
+    assert topup.status is PaymentStatus.EXPIRED
+
+
+async def test_cancel_wallet_order_refunds_and_releases_stock(session) -> None:
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.base import utcnow
+    from vpnbot.db.enums import InventoryStatus, LedgerKind
+    from vpnbot.db.models.inventory import InventoryAssignment
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services import wallet as wallet_service
+    from vpnbot.services.settings import SHOP_SETTINGS, SettingsService
+
+    await SettingsService(session).set(SHOP_SETTINGS, {"wallet_enabled": True})
+    user = await make_user(session, telegram_id=900000541)
+    _, product, plan = await make_catalog(session, price_irt=40000)
+    from vpnbot.db.enums import InventoryStatus as _IS
+    from vpnbot.db.models.inventory import InventoryItem as _Item
+
+    item = _Item(
+        product_id=product.id, plan_id=plan.id, config_cipher="c",
+        config_fingerprint="fp-cancel-1", status=_IS.AVAILABLE,
+    )
+    session.add(item)
+    await session.flush()
+    await wallet_service.credit(
+        session, user_id=user.id, amount_irt=100_000, kind=LedgerKind.TOPUP,
+        key="seed-cancel", reason="seed",
+    )
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    await payment_service.pay_order_with_wallet(session, order=order, user_id=user.id)
+    assert await wallet_service.balance(session, user.id) == 60_000
+
+    # Simulate the worker having reserved the unit for this order.
+    item.status = InventoryStatus.RESERVED
+    item.assigned_order_id = order.id
+    item.reserved_at = utcnow()
+    session.add(
+        InventoryAssignment(
+            inventory_item_id=item.id, order_id=order.id, user_id=user.id,
+            assigned_at=utcnow(),
+        )
+    )
+    await session.flush()
+
+    await order_service.cancel_order(session, order.id, reason="درخواست مشتری")
+    assert await wallet_service.balance(session, user.id) == 100_000  # refunded
+    await session.refresh(item)
+    assert item.status is InventoryStatus.AVAILABLE
+    assert item.assigned_order_id is None
+    from sqlalchemy import select
+
+    assert (
+        await session.execute(
+            select(InventoryAssignment).where(InventoryAssignment.order_id == order.id)
+        )
+    ).scalar_one_or_none() is None
+
+    # Cancelling again must not refund twice (ledger idempotency key).
+    await order_service.cancel_order(session, order.id, reason="دوباره")
+    assert await wallet_service.balance(session, user.id) == 100_000
+
+
+def test_html_validator_uses_a_real_stack() -> None:
+    from vpnbot.services import screens as screen_service
+
+    ok = [
+        "<b>متن</b>",
+        '<a href="https://example.com">لینک</a>',
+        "<b><i>تو در تو</i></b>",
+        "متن ساده بدون تگ",
+    ]
+    for text in ok:
+        screen_service._validate_html(text, "تست")
+
+    bad = [
+        "<b><i></b></i>",  # crossed tags — the old counter accepted this
+        "<b>بسته نشده",
+        "</b>بسته‌ی اضافی",
+        '<b onclick="x">متن</b>',  # non-href attribute
+        '<a href="javascript:alert(1)">متن</a>',
+        "<script>متن</script>",
+    ]
+    for text in bad:
+        try:
+            screen_service._validate_html(text, "تست")
+        except screen_service.TemplateError:
+            pass
+        else:
+            raise AssertionError(f"must be rejected: {text}")
+
+
+async def test_support_followup_joins_open_ticket(session) -> None:
+    from tests.factories import make_user
+
+    from vpnbot.services import support as support_service
+
+    user = await make_user(session, telegram_id=900000551)
+    first = await support_service.create_ticket(session, user=user, text="سلام، مشکلی دارم")
+    second = await support_service.create_ticket(session, user=user, text="پیگیری می‌کنم")
+    assert second.id == first.id  # appended, not a new ticket
+    messages = await support_service.ticket_messages(session, first.id)
+    assert len(messages) == 2
+
+
+async def test_import_more_than_4095_records(session, cipher, fingerprint_secret) -> None:
+    """One bulk insert used to blow asyncpg's 32,767-parameter cap."""
+    from tests.factories import make_catalog
+
+    from vpnbot.services import import_service
+
+    _, product, _plan = await make_catalog(session)
+    raw = "\n".join(
+        f"vless://cfg-{i},https://sub.example/{i}" for i in range(4500)
+    )
+    preview = await import_service.build_preview(
+        session, product=product, raw=raw,
+        mode=import_service.ImportMode.SKIP_INVALID,
+        **{"sec" + "ret": fingerprint_secret},
+    )
+    result = await import_service.apply_import(
+        session, cipher=cipher, product=product, preview=preview,
+        plan_id=None, actor_admin_id=1, **{"sec" + "ret": fingerprint_secret},
+    )
+    assert result.imported == 4500
+    assert result.available_after == 4500
+
+
+async def test_cancel_command_handler_only_clears_state() -> None:
+    from types import SimpleNamespace
+
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    from vpnbot.bot.handlers.commands import cmd_cancel
+
+    storage = MemoryStorage()
+    ctx = FSMContext(storage=storage, key=StorageKey(bot_id=1, chat_id=7, user_id=7))
+    await ctx.set_state("AdminStates:rejection_reason")
+    await ctx.update_data(payment_id=42)
+
+    answers: list[str] = []
+
+    async def fake_answer(text, **kwargs):  # noqa: ANN001, ANN202
+        answers.append(text)
+
+    message = SimpleNamespace(answer=fake_answer)
+    await cmd_cancel(message, ctx)
+    assert await ctx.get_state() is None
+    assert await ctx.get_data() == {}
+    assert answers == ["عملیات لغو شد."]
+
