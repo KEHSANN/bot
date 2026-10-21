@@ -2146,3 +2146,113 @@ async def test_upsert_user_seen_write_throttle(session) -> None:
     await session.flush()
     refreshed = await auth_service.upsert_user(session, telegram_id=900001211, first_name="الف")
     assert refreshed.last_seen_at > utcnow() - timedelta(seconds=30)  # stale: written
+
+
+# --- Round 15: audit batch SEC-02..10 / BUG-02..07 -----------------------
+
+
+async def test_receipt_on_cancelled_order_refused(session) -> None:
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import PaymentMethod
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services.auth import bootstrap_owner
+    from vpnbot.services.settings import CARD_SETTINGS, SettingsService
+
+    admin = await bootstrap_owner(session, telegram_id=900001500)
+    user = await make_user(session, telegram_id=900001501)
+    await SettingsService(session).set(
+        CARD_SETTINGS,
+        {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
+    )
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 1, "zombie")
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    payment = await payment_service.start_payment(session, order=order, method=PaymentMethod.CARD)
+    await payment_service.submit_card_receipt(
+        session, payment_id=payment.id, user_id=user.id, file_id="f1", file_type="PHOTO"
+    )
+    await payment_service.reject_payment(session, payment_id=payment.id, admin_id=admin.id, reason="ناخوانا")
+    await order_service.cancel_order(session, order.id, reason="x")
+    # The REJECTED payment is now CANCELLED with the order, and a late
+    # receipt submission is refused instead of reviving a zombie
+    # review item on a cancelled order.
+    try:
+        await payment_service.submit_card_receipt(
+            session, payment_id=payment.id, user_id=user.id, file_id="f2", file_type="PHOTO"
+        )
+    except payment_service.PaymentError:
+        pass
+    else:
+        raise AssertionError("receipt onto a cancelled order must be refused")
+
+
+async def test_import_combo_pair_and_subscription_links(session) -> None:
+    from tests.factories import make_catalog
+
+    from vpnbot.db.enums import ProductType
+    from vpnbot.services import import_service
+
+    _, combo, combo_plan = await make_catalog(session)
+    combo.product_type = ProductType.COMBO
+    await session.flush()
+    preview = await import_service.build_preview(
+        session, product=combo, raw="vless://only-config", mode=import_service.ImportMode.ALL_OR_NOTHING,
+        secret="s",
+    )
+    assert preview.valid == 0  # COMBO requires the pair now
+
+    _, subs, subs_plan = await make_catalog(session)
+    subs.product_type = ProductType.SUBSCRIPTION
+    await session.flush()
+    preview = await import_service.build_preview(
+        session, product=subs, raw="https://example.com/sub/abc", mode=import_service.ImportMode.ALL_OR_NOTHING,
+        secret="s",
+    )
+    assert preview.valid == 1  # a bare subscription link is a record
+
+    records = import_service.parse_records("vless://cfg|badlink-not-a-url")
+    assert records[0].error  # pair-shaped line with a broken link errors explicitly
+    records = import_service.parse_records("vless://cfg#DE | VIP", allow_config_only=True)
+    assert records[0].error is None  # pipe inside the fragment is a server name
+
+
+async def test_shop_list_hides_sales_disabled_and_category_off(session) -> None:
+    from tests.factories import make_catalog
+
+    from vpnbot.services import catalog as catalog_service
+
+    category, product, _plan = await make_catalog(session)
+    _products, total = await catalog_service.list_products(session, active_only=True)
+    assert total == 1
+    product.sales_enabled = False
+    await session.flush()
+    _products, total = await catalog_service.list_products(session, active_only=True)
+    assert total == 0
+    product.sales_enabled = True
+    category.is_active = False
+    await session.flush()
+    _products, total = await catalog_service.list_products(session, active_only=True)
+    assert total == 0
+
+
+async def test_enum_check_constraint_exists(session) -> None:
+    # The migration adds real CHECK constraints: an out-of-enum value
+    # is rejected by the database itself now.
+    from sqlalchemy import text
+    from sqlalchemy.exc import DBAPIError
+    from tests.factories import make_user
+
+    user = await make_user(session, telegram_id=900001531)
+    try:
+        await session.execute(
+            text("UPDATE users SET status='BOGUS' WHERE id=:i"), {"i": user.id}
+        )
+        await session.flush()
+    except DBAPIError:
+        await session.rollback()
+    else:
+        raise AssertionError("out-of-enum status must violate the CHECK constraint")
