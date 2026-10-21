@@ -122,6 +122,10 @@ async def support_router(
 ) -> None:
     admin = common.guard(admin, Permission.SUPPORT_MANAGE)
     action = callback_data.action
+    # Navigating in this section abandons any half-finished wizard
+    # (see the note in the payments router): flow entries re-set
+    # their state after this clear.
+    await state.clear()
     if action in ("block", "block_yes", "unblock"):
         # Blocking also wipes the user's receipts — a financial action,
         # not a support one. A pure support-role admin (no wallet

@@ -138,6 +138,7 @@ async def submit_crypto_evidence(
     normalized = normalize_txid(txid)
     if not valid_txid(normalized):
         raise PaymentError("هش تراکنش نامعتبر است")
+    await lock_txid(session, normalized)
     # One transfer funds one thing: check top-ups as well as payments —
     # this path used to look at payments only, so a TXID already used
     # for a wallet top-up could be submitted again for an order.
@@ -185,6 +186,24 @@ def valid_txid(normalized: str) -> bool:
     """A normalized TXID is 8-200 chars of [0-9a-z_-] — no control
     characters, no whitespace, no free-form text."""
     return bool(_TXID_RE.fullmatch(normalized or ""))
+
+
+async def lock_txid(session: AsyncSession, normalized: str) -> None:
+    """Serialize TXID check-and-record across BOTH tables.
+
+    ``txid_taken`` is a plain SELECT under READ COMMITTED and the
+    unique constraints live per-table, so two concurrent submissions
+    of the same TXID — one for an order, one for a wallet top-up —
+    both saw "not taken" and both committed: one transfer funded two
+    things. A transaction-scoped advisory lock on the normalized hash
+    makes check + insert atomic against every other submitter of the
+    same TXID, on either path.
+    """
+    from sqlalchemy import text
+
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:txid))"), {"txid": normalized}
+    )
 
 
 async def txid_taken(
@@ -246,6 +265,20 @@ async def pay_order_with_wallet(
     shop = await SettingsService(session).get(SHOP_SETTINGS)
     if not shop.get("wallet_enabled", True):
         raise PaymentError("پرداخت با کیف پول در حال حاضر غیرفعال است")
+
+    # Lock the ORDER row first — the same row cancel_order locks. The
+    # old code locked only the payment row (which may not even exist
+    # yet for a fresh order), so a concurrent cancel could slip in:
+    # it marked the order/payment CANCELLED from its own snapshot
+    # while this transaction debited the wallet from its snapshot,
+    # and the overwrite order left the customer charged for a
+    # cancelled, never-delivered order with no refund.
+    from vpnbot.services import orders as order_service
+
+    locked = await order_service.get_order(session, order.id, for_update=True)
+    if locked is None:
+        raise PaymentError("سفارش یافت نشد")
+    order = locked
 
     payment = (
         await session.execute(

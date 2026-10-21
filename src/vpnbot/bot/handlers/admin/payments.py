@@ -231,6 +231,12 @@ async def topups_router(
 ) -> None:
     admin = common.guard(admin, Permission.PAYMENT_REVIEW)
     action = callback_data.action
+    # Navigating anywhere in this section abandons a half-finished
+    # wizard from another screen: without this, an admin mid
+    # payment_note who tapped an old list button kept the state armed
+    # and their next text message approved the payment. Flow entries
+    # below re-set their state after this clear.
+    await state.clear()
 
     if action == "view":
         await _show_topup(callback, session, admin, callback_data.item_id)
@@ -298,6 +304,12 @@ async def payments_router(
 ) -> None:
     admin = common.guard(admin, Permission.PAYMENT_REVIEW)
     action = callback_data.action
+    # Navigating anywhere in this section abandons a half-finished
+    # wizard from another screen: without this, an admin mid
+    # payment_note who tapped an old list button kept the state armed
+    # and their next text message approved the payment. Flow entries
+    # below re-set their state after this clear.
+    await state.clear()
 
     if action == "view":
         await _show_payment(callback, session, admin, callback_data.item_id)

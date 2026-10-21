@@ -19,7 +19,11 @@ class NotAuthorized(Exception):
 
 
 def make_referral_code(telegram_id: int) -> str:
-    return f"u{telegram_id}{random_token(4).replace('-', '').replace('_', '')[:4]}"
+    # Opaque random code. The old format embedded the telegram_id
+    # itself (f"u{telegram_id}..."), so anyone who saw a user's
+    # invite link learned their numeric Telegram id.
+    _ = telegram_id  # kept for signature compatibility; unused
+    return "u" + random_token(12).replace("-", "").replace("_", "")[:12]
 
 
 async def upsert_user(
@@ -35,16 +39,27 @@ async def upsert_user(
     ).scalar_one_or_none()
     now = utcnow()
     if user is None:
-        user = User(
-            telegram_id=telegram_id,
-            username=username,
-            first_name=first_name,
-            last_name=last_name,
-            referral_code=make_referral_code(telegram_id),
-            last_seen_at=now,
+        # Insert atomically: two first-ever updates from the same new
+        # user processed concurrently both found no row and both
+        # inserted — one of them crashed on the telegram_id unique
+        # constraint and the update was lost.
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        await session.execute(
+            pg_insert(User.__table__)
+            .values(
+                telegram_id=telegram_id,
+                username=username,
+                first_name=first_name,
+                last_name=last_name,
+                referral_code=make_referral_code(telegram_id),
+                last_seen_at=now,
+            )
+            .on_conflict_do_nothing(index_elements=["telegram_id"])
         )
-        session.add(user)
-        await session.flush()
+        user = (
+            await session.execute(select(User).where(User.telegram_id == telegram_id))
+        ).scalar_one()
     else:
         user.username = username
         user.first_name = first_name or user.first_name
@@ -65,6 +80,25 @@ async def bind_referral(session: AsyncSession, user: User, code: str) -> bool:
         await session.execute(select(User).where(User.referral_code == code))
     ).scalar_one_or_none()
     if inviter is None or inviter.id == user.id:
+        return False
+    # Lock both user rows (in id order, so concurrent binds can't
+    # deadlock) and re-read under the lock: two users sending each
+    # other /start ref links simultaneously could otherwise each pass
+    # the mutual/cycle checks against the other's uncommitted state
+    # and close a loop anyway.
+    locked = (
+        await session.execute(
+            select(User)
+            .where(User.id.in_([user.id, inviter.id]))
+            .order_by(User.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalars()
+    by_id = {u.id: u for u in locked}
+    user = by_id.get(user.id, user)
+    inviter = by_id.get(inviter.id, inviter)
+    if user.referred_by_id is not None:
         return False
     if inviter.referred_by_id == user.id:
         # Mutual invites: A invited B, now B tries to invite A back

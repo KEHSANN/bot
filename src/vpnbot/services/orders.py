@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 from vpnbot.db.enums import DeliveryStatus, OrderStatus, PaymentMethod
 from vpnbot.db.models.catalog import Plan, Product
 from vpnbot.db.models.orders import Order, Payment
+from vpnbot.db.models.users import User
 from vpnbot.services import catalog as catalog_service
 
 
@@ -29,6 +30,11 @@ def _public_id() -> str:
 async def create_order(
     session: AsyncSession, *, user_id: int, plan_id: int, product: Product, plan: Plan
 ) -> Order:
+    # Serialize per-user creation: the open-order cap below is a
+    # COUNT under READ COMMITTED — ten simultaneous requests could
+    # each count < cap and all insert. Locking the user's row makes
+    # count + insert atomic per user.
+    await session.execute(select(User.id).where(User.id == user_id).with_for_update())
     if not product.is_on_sale or not plan.is_on_sale or plan.product_id != product.id:
         raise OrderError("این محصول یا پلن در حال حاضر قابل خرید نیست")
     if plan.price_irt <= 0:
@@ -81,7 +87,11 @@ async def get_order(
     if with_payment:
         stmt = stmt.options(selectinload(Order.payment))
     if for_update:
-        stmt = stmt.with_for_update(of=Order)
+        # populate_existing: without it, a session-cached instance
+        # keeps its stale attribute values even though the row was
+        # just locked and re-read — callers deciding on order.status
+        # (cancel vs pay races) would act on the old state.
+        stmt = stmt.with_for_update(of=Order).execution_options(populate_existing=True)
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
@@ -168,6 +178,11 @@ async def expire_stale_orders(session: AsyncSession) -> int:
         if payment is not None and payment.status is PaymentStatus.AWAITING_PAYMENT_DETAILS:
             payment.status = PaymentStatus.EXPIRED
             payment.txid = None
+            # Flush BEFORE delegating: cancel_order re-reads the order
+            # with populate_existing, which would otherwise overwrite
+            # this unflushed EXPIRED with the stored AWAITING value
+            # and then "cancel" the payment a second time.
+            await session.flush()
         await cancel_order(session, order.id, reason="انقضای مهلت تکمیل سفارش")
         cancelled += 1
     return cancelled

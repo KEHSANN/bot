@@ -163,6 +163,11 @@ async def wallet_router(
 ) -> None:
     admin = common.guard(admin, Permission.WALLET_ADJUST)
     action = callback_data.action
+    if action != "adjust":
+        # Same anti-bleed clear as the other sections — except the
+        # adjust confirmation, which CONSUMES the wizard's FSM data
+        # (amount/reason/direction) and must not have it wiped.
+        await state.clear()
 
     if action == "find":
         await state.set_state(AdminStates.wallet_adjust)
