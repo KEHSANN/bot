@@ -200,6 +200,10 @@ def _validate_html(text: str, field_name: str) -> None:
         if tag not in _ALLOWED_TAGS:
             raise TemplateError(f"تگ HTML مجاز نیست در {field_name}: <{tag}>")
         attrs = match.group(2) or ""
+        if raw.startswith("</") and attrs.strip():
+            # Attributes on a CLOSING tag (</a href="x">) are malformed;
+            # the scan below would even accept href there.
+            raise TemplateError(f"تگ بسته نباید ویژگی داشته باشد در {field_name}: {raw}")
         attr_names = set()
         for attr, value in _ANY_ATTR_RE.findall(attrs):
             attr_names.add(attr.lower())

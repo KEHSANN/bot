@@ -24,7 +24,10 @@ MAX_OPEN_ORDERS = 3
 
 
 def _public_id() -> str:
-    return secrets.token_hex(4).upper()
+    # 48 bits (was 32): at ~65k orders the birthday bound made a
+    # collision likely, and a collision crashed checkout on the
+    # unique constraint. create_order also retries on collision.
+    return secrets.token_hex(6).upper()
 
 
 async def create_order(
@@ -76,7 +79,19 @@ async def create_order(
         delivery_status=DeliveryStatus.NOT_STARTED,
     )
     session.add(order)
-    await session.flush()
+    # Regenerate on the (astronomically unlikely) public_id collision
+    # instead of crashing the checkout with an IntegrityError.
+    from sqlalchemy.exc import IntegrityError
+
+    for attempt in range(3):
+        try:
+            async with session.begin_nested():
+                await session.flush()
+            break
+        except IntegrityError:
+            if attempt == 2:
+                raise
+            order.public_id = _public_id()
     return order
 
 
@@ -188,6 +203,38 @@ async def expire_stale_orders(session: AsyncSession) -> int:
     return cancelled
 
 
+async def cancel_preview_orders(
+    session: AsyncSession, *, user_id: int, keep_order_id: int
+) -> int:
+    """Cancel the user's OTHER payment-less pending orders.
+
+    A payment-less PENDING_PAYMENT order is a checkout preview that
+    was never carried into a payment method (wallet-ask views, an
+    abandoned card flow). Piling three of them up used to exhaust
+    the open-order cap just by browsing prices. They hold no money
+    and no receipt, so a newer checkout supersedes them safely.
+    """
+    from vpnbot.db.models.orders import Payment
+
+    rows = (
+        await session.execute(
+            select(Order)
+            .outerjoin(Payment, Payment.order_id == Order.id)
+            .where(
+                Order.user_id == user_id,
+                Order.status == OrderStatus.PENDING_PAYMENT,
+                Order.id != keep_order_id,
+                Payment.id.is_(None),
+            )
+        )
+    ).scalars()
+    count = 0
+    for stale in rows:
+        await cancel_order(session, stale.id, reason="جایگزین‌شده با پیش‌نمایش جدید")
+        count += 1
+    return count
+
+
 async def cancel_order(session: AsyncSession, order_id: int, *, reason: str | None = None) -> Order:
     order = await get_order(session, order_id, for_update=True)
     if order is None:
@@ -233,15 +280,28 @@ async def cancel_order(session: AsyncSession, order_id: int, *, reason: str | No
     # The payment leaves the review queue with the order; before this,
     # a cancelled order's receipt sat in PENDING_REVIEW forever.
     payment = order.payment
+    # Captured BEFORE the status flip below: the refund leg keys off
+    # the payment having been APPROVED at cancel time.
+    refund_wallet = (
+        payment is not None
+        and payment.method is PaymentMethod.WALLET
+        and payment.status is PaymentStatus.APPROVED
+    )
     if payment is not None and payment.status in (
         PaymentStatus.AWAITING_PAYMENT_DETAILS,
         PaymentStatus.PENDING_REVIEW,
+        PaymentStatus.REJECTED,
+        PaymentStatus.APPROVED,
     ):
+        # REJECTED joins the list so a cancelled order's payment can
+        # never be resubmitted into the review queue; APPROVED joins
+        # so a cancelled paid order does not keep a live-looking
+        # payment (its review record preserves the history) — and
+        # either way the TXID is freed like reject/expire do: the
+        # column is unique and txid_taken ignores status, so a
+        # cancelled payment's hash stayed burned forever and the
+        # customer could never resubmit that (real) transfer.
         payment.status = PaymentStatus.CANCELLED
-        # Free the TXID like reject/expire do: the txid column is
-        # unique and txid_taken ignores status, so a cancelled
-        # payment's hash stayed burned forever and the customer could
-        # never resubmit that (real) transfer for a new order.
         payment.txid = None
 
     if attempts == 0:
@@ -261,11 +321,7 @@ async def cancel_order(session: AsyncSession, order_id: int, *, reason: str | No
         # Wallet-paid orders refund themselves back to the wallet,
         # exactly once (ledger idempotency key). Card/crypto payments
         # were settled outside the bot — refunding those stays manual.
-        if (
-            payment is not None
-            and payment.method is PaymentMethod.WALLET
-            and payment.status is PaymentStatus.APPROVED
-        ):
+        if refund_wallet:
             await wallet_service.credit(
                 session,
                 user_id=order.user_id,

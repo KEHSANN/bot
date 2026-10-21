@@ -97,6 +97,7 @@ async def submit_card_receipt(
     session: AsyncSession, *, payment_id: int, user_id: int, file_id: str, file_type: str
 ) -> Payment:
     payment = await _payment_for_user(session, payment_id, user_id)
+    await _require_order_payable(session, payment)
     if payment.method is not PaymentMethod.CARD:
         raise PaymentError("این پرداخت از نوع کارت‌به‌کارت نیست")
     if payment.status not in (
@@ -127,6 +128,7 @@ async def submit_crypto_evidence(
     file_type: str | None = None,
 ) -> Payment:
     payment = await _payment_for_user(session, payment_id, user_id)
+    await _require_order_payable(session, payment)
     if payment.method is not PaymentMethod.CRYPTO:
         raise PaymentError("این پرداخت از نوع کریپتو نیست")
     if payment.status not in (
@@ -246,6 +248,22 @@ async def _payment_for_user(session: AsyncSession, payment_id: int, user_id: int
     if order is None or order.user_id != user_id:
         raise PaymentError("پرداخت یافت نشد")
     return payment
+
+
+async def _require_order_payable(session: AsyncSession, payment: Payment) -> None:
+    """Evidence may only land on a live, unpaid order.
+
+    The submit paths used to look at the payment's status alone, so a
+    receipt could be submitted onto a CANCELLED order (its payment was
+    REJECTED, which cancel left untouched): the payment went back to
+    PENDING_REVIEW, entered the admin queue, and approval then failed
+    on the cancelled order — a zombie review item forever.
+    """
+    order = await session.get(Order, payment.order_id)
+    if order is None or order.status is not OrderStatus.PENDING_PAYMENT:
+        raise PaymentError("این سفارش دیگر قابل پرداخت نیست")
+    if payment.expires_at is not None and payment.expires_at < utcnow():
+        raise PaymentError("مهلت ارسال رسید این سفارش تمام شده است")
 
 
 async def pay_order_with_wallet(
