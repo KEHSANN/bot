@@ -8,6 +8,7 @@ TXID never approve themselves.
 
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 
 from sqlalchemy import func, select
@@ -29,6 +30,7 @@ from vpnbot.db.enums import (
 from vpnbot.db.models.orders import Order, Payment, PaymentReview
 from vpnbot.db.models.system import Job
 from vpnbot.services import audit as audit_service
+from vpnbot.services import notify
 from vpnbot.services import wallet as wallet_service
 from vpnbot.services.settings import (
     CARD_SETTINGS,
@@ -40,6 +42,17 @@ from vpnbot.services.settings import (
 
 class PaymentError(ValueError):
     pass
+
+
+def _review_ttl() -> timedelta:
+    """Payment evidence window — from configuration, not hardcoded.
+
+    ``PAYMENT_REVIEW_TTL_HOURS`` has been in .env/config since the
+    beginning but the services ignored it and always used 48h.
+    """
+    from vpnbot.config import get_settings
+
+    return timedelta(hours=get_settings().payment_review_ttl_hours)
 
 
 async def start_payment(
@@ -74,7 +87,7 @@ async def start_payment(
         payment.submitted_at = None
         payment.rejection_reason = None
     payment.instructions_snapshot = details
-    payment.expires_at = utcnow() + timedelta(hours=48)
+    payment.expires_at = utcnow() + _review_ttl()
     await session.flush()
     return payment
 
@@ -95,6 +108,11 @@ async def submit_card_receipt(
     payment.status = PaymentStatus.PENDING_REVIEW
     payment.submitted_at = utcnow()
     payment.rejection_reason = None
+    await notify.enqueue_admins(
+        session,
+        text=f"🧾 رسید پرداخت جدید برای سفارش #{payment.order_id} — در انتظار بررسی.",
+        idempotency_key=f"notify:payment:{payment.id}:receipt",
+    )
     await session.flush()
     return payment
 
@@ -118,18 +136,12 @@ async def submit_crypto_evidence(
         raise PaymentError("امکان ارسال مجدد شواهد در این وضعیت وجود ندارد")
 
     normalized = normalize_txid(txid)
-    if len(normalized) < 8 or len(normalized) > 200:
+    if not valid_txid(normalized):
         raise PaymentError("هش تراکنش نامعتبر است")
-    # Case-insensitive: the same hash typed with different casing must not be
-    # accepted twice.
-    duplicate = (
-        await session.execute(
-            select(Payment.id).where(
-                func.lower(Payment.txid) == normalized.lower(), Payment.id != payment.id
-            )
-        )
-    ).first()
-    if duplicate is not None:
+    # One transfer funds one thing: check top-ups as well as payments —
+    # this path used to look at payments only, so a TXID already used
+    # for a wallet top-up could be submitted again for an order.
+    if await txid_taken(session, normalized, exclude_payment_id=payment.id):
         raise PaymentError("این هش تراکنش قبلاً ثبت شده است")
 
     payment.txid = normalized
@@ -138,7 +150,12 @@ async def submit_crypto_evidence(
     payment.status = PaymentStatus.PENDING_REVIEW
     payment.submitted_at = utcnow()
     payment.rejection_reason = None
-    payment.expires_at = utcnow() + timedelta(hours=48)
+    payment.expires_at = utcnow() + _review_ttl()
+    await notify.enqueue_admins(
+        session,
+        text=f"🧾 هش تراکنش جدید برای سفارش #{payment.order_id} — در انتظار بررسی.",
+        idempotency_key=f"notify:payment:{payment.id}:receipt",
+    )
     try:
         async with session.begin_nested():
             await session.flush()
@@ -150,10 +167,53 @@ async def submit_crypto_evidence(
 
 
 def normalize_txid(raw: str) -> str:
-    value = (raw or "").strip()
-    if value.lower().startswith("0x"):
-        return "0x" + value[2:].lower()
-    return value
+    """Canonical TXID form: stripped and fully lowercased.
+
+    TRC20 hashes (the default network) are 64 hex chars *without* a 0x
+    prefix, so the old "lowercase only after 0x" rule stored ``ABC…`` and
+    ``abc…`` as different values — the case-sensitive DB unique index
+    then let the same transfer be submitted twice concurrently. Now the
+    stored value is canonical, so the unique index itself enforces
+    case-insensitive uniqueness.
+    """
+    return (raw or "").strip().lower()
+
+
+_TXID_RE = re.compile(r"^[0-9a-z_-]{8,200}$")
+
+
+def valid_txid(normalized: str) -> bool:
+    """A normalized TXID is 8-200 chars of [0-9a-z_-] — no control
+    characters, no whitespace, no free-form text."""
+    return bool(_TXID_RE.fullmatch(normalized or ""))
+
+
+async def txid_taken(
+    session: AsyncSession,
+    normalized: str,
+    *,
+    exclude_payment_id: int | None = None,
+    exclude_topup_id: int | None = None,
+) -> bool:
+    """Is this TXID already recorded on ANY payment or wallet top-up?
+
+    One transfer funds exactly one thing. Both submission paths must ask
+    this — checking only the payments table let a TXID used for a
+    top-up be reused for an order (and under concurrency, vice versa).
+    Stored values are canonical (see normalize_txid), and the comparison
+    lowercases defensively for rows written before canonicalisation.
+    """
+    from vpnbot.db.models.wallet import WalletTopUp
+
+    payment_q = select(Payment.id).where(func.lower(Payment.txid) == normalized)
+    if exclude_payment_id is not None:
+        payment_q = payment_q.where(Payment.id != exclude_payment_id)
+    if (await session.execute(payment_q)).first() is not None:
+        return True
+    topup_q = select(WalletTopUp.id).where(func.lower(WalletTopUp.txid) == normalized)
+    if exclude_topup_id is not None:
+        topup_q = topup_q.where(WalletTopUp.id != exclude_topup_id)
+    return (await session.execute(topup_q)).first() is not None
 
 
 async def _payment_for_user(session: AsyncSession, payment_id: int, user_id: int) -> Payment:
@@ -346,10 +406,15 @@ async def reject_payment(
     if payment.status not in (PaymentStatus.PENDING_REVIEW, PaymentStatus.AWAITING_PAYMENT_DETAILS):
         raise PaymentError("این پرداخت در وضعیت قابل رد نیست")
 
+    old_txid = payment.txid
     payment.status = PaymentStatus.REJECTED
     payment.reviewed_at = utcnow()
     payment.reviewed_by_admin_id = admin_id
     payment.rejection_reason = reason[:500]
+    # Free the TXID: a rejected submission must not burn the customer's
+    # real transfer forever (nor let a squatter lock someone else's
+    # TXID). The value stays visible in the audit trail below.
+    payment.txid = None
     session.add(
         PaymentReview(payment_id=payment.id, admin_id=admin_id, decision="REJECTED", reason=reason[:500])
     )
@@ -360,21 +425,42 @@ async def reject_payment(
         action="payment.rejected",
         entity_type="payment",
         entity_id=payment.id,
-        data={"reason": reason[:500]},
+        data={"reason": reason[:500], "txid": old_txid},
     )
+    # The customer was told in the panel copy that the reason is
+    # recorded for them — actually tell them.
+    order = await session.get(Order, payment.order_id)
+    if order is not None:
+        await notify.enqueue_user(
+            session,
+            user_id=order.user_id,
+            text=(
+                f"❌ پرداخت سفارش #{order.public_id} رد شد.\n"
+                f"دلیل: {reason[:500]}\n"
+                "می‌توانید از بخش سفارش‌ها، رسید یا هش صحیح را دوباره ارسال کنید."
+            ),
+            idempotency_key=f"notify:payment:{payment.id}:rejected",
+        )
     await session.flush()
     return payment
 
 
 async def expire_stale_payments(session: AsyncSession) -> int:
+    """Expire payments whose evidence window closed with nothing sent.
+
+    Only ``AWAITING_PAYMENT_DETAILS`` expires. A payment in
+    ``PENDING_REVIEW`` means the customer already sent money/evidence —
+    expiring it after 48h silently dropped paid orders from the review
+    queue (the previous behaviour). Those wait for a human, however long
+    that takes. Expiring also cancels the still-unpaid order and frees
+    its TXID.
+    """
     now = utcnow()
     rows = (
         await session.execute(
             select(Payment)
             .where(
-                Payment.status.in_(
-                    [PaymentStatus.AWAITING_PAYMENT_DETAILS, PaymentStatus.PENDING_REVIEW]
-                ),
+                Payment.status == PaymentStatus.AWAITING_PAYMENT_DETAILS,
                 Payment.expires_at.is_not(None),
                 Payment.expires_at < now,
             )
@@ -384,6 +470,11 @@ async def expire_stale_payments(session: AsyncSession) -> int:
     count = 0
     for payment in rows:
         payment.status = PaymentStatus.EXPIRED
+        payment.txid = None
+        order = await session.get(Order, payment.order_id)
+        if order is not None and order.status is OrderStatus.PENDING_PAYMENT:
+            order.status = OrderStatus.CANCELLED
+            order.cancelled_at = now
         count += 1
     await session.flush()
     return count

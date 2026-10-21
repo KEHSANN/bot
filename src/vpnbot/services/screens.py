@@ -106,7 +106,6 @@ _ALLOWED_TAGS = {
     "code", "pre", "a", "blockquote", "tg-spoiler", "span",
 }
 _TAG_RE = re.compile(r"</?([a-zA-Z-]+)((?:\s+[^<>]*)?)>")
-_ATTR_RE = re.compile(r'\s+(class|href)\s*=\s*("[^"]*"|\'[^\']*\')')
 
 MAX_TEXT_LEN = 4096
 MAX_CAPTION_LEN = 1024
@@ -167,26 +166,45 @@ def validate_text(text: str, *, limit: int = MAX_TEXT_LEN, field_name: str = "م
     _validate_html(text, field_name)
 
 
+_ANY_ATTR_RE = re.compile(r"""([a-zA-Z-]+)\s*=\s*("[^"]*"|'[^']*')""")
+
+
 def _validate_html(text: str, field_name: str) -> None:
-    depth = 0
+    """Validate Telegram HTML with a real tag stack.
+
+    The previous version only counted open/close depth, so crossed tags
+    (``<b><i></b></i>``) passed and then failed at send time, and it only
+    *looked* at class/href attributes — any other attribute slipped
+    through unchecked. Now: tags must nest properly, and the only
+    attribute allowed anywhere is ``href`` on ``<a>`` with a safe scheme.
+    """
+    stack: list[str] = []
     for match in _TAG_RE.finditer(text):
+        raw = match.group(0)
         tag = match.group(1).lower()
         if tag not in _ALLOWED_TAGS:
             raise TemplateError(f"تگ HTML مجاز نیست در {field_name}: <{tag}>")
-        for attr, value in _ATTR_RE.findall(match.group(2) or ""):
+        attrs = match.group(2) or ""
+        for attr, value in _ANY_ATTR_RE.findall(attrs):
             if tag != "a" or attr.lower() != "href":
                 raise TemplateError(f"ویژگی «{attr}» در {field_name} مجاز نیست")
             url = value.strip("\"'")
             if not url.startswith(("https://", "http://", "tg://")):
                 raise TemplateError("لینک دکمه/متن باید https یا tg باشد")
-        if match.group(0).startswith("</"):
-            depth -= 1
-        elif not match.group(0).endswith("/>"):
-            depth += 1
-        if depth < 0:
-            raise TemplateError(f"تگ HTML نامتوازن در {field_name}")
-    if depth != 0:
-        raise TemplateError(f"تگ HTML بسته‌نشده در {field_name}")
+        # Anything left in the attribute area that is not a parsed
+        # name="value" pair (unquoted values, stray words) is rejected.
+        if _ANY_ATTR_RE.sub("", attrs).strip().rstrip("/").strip():
+            raise TemplateError(f"ویژگی نامعتبر در {field_name}: <{tag}>")
+        if raw.startswith("</"):
+            if not stack or stack[-1] != tag:
+                raise TemplateError(f"تگ HTML نامتوازن در {field_name}: </{tag}>")
+            stack.pop()
+        elif raw.endswith("/>"):
+            continue  # self-closing: never pushed
+        else:
+            stack.append(tag)
+    if stack:
+        raise TemplateError(f"تگ HTML بسته‌نشده در {field_name}: <{stack[-1]}>")
 
 
 def validate_action(action: str) -> None:

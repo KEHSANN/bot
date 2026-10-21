@@ -8,19 +8,17 @@ The minimum amount and the on/off switch are admin settings
 
 from __future__ import annotations
 
-from datetime import timedelta
-
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vpnbot.db.base import utcnow
 from vpnbot.db.enums import AuditActor, LedgerKind, PaymentMethod, PaymentStatus
-from vpnbot.db.models.orders import Payment
 from vpnbot.db.models.wallet import WalletTopUp
 from vpnbot.services import audit as audit_service
+from vpnbot.services import notify
 from vpnbot.services import wallet as wallet_service
-from vpnbot.services.payments import normalize_txid
+from vpnbot.services.payments import _review_ttl, normalize_txid, txid_taken, valid_txid
 from vpnbot.services.settings import (
     CARD_SETTINGS,
     CRYPTO_SETTINGS,
@@ -71,7 +69,7 @@ async def create_topup(
         amount_irt=amount_irt,
         method=method,
         instructions_snapshot=details,
-        expires_at=utcnow() + timedelta(hours=48),
+        expires_at=utcnow() + _review_ttl(),
     )
     session.add(topup)
     await session.flush()
@@ -102,6 +100,11 @@ async def submit_card_receipt(
     topup.status = PaymentStatus.PENDING_REVIEW
     topup.submitted_at = utcnow()
     topup.rejection_reason = None
+    await notify.enqueue_admins(
+        session,
+        text=f"🧾 رسید شارژ کیف پول جدید (#{topup.id}) — در انتظار بررسی.",
+        idempotency_key=f"notify:topup:{topup.id}:receipt",
+    )
     await session.flush()
     return topup
 
@@ -121,22 +124,10 @@ async def submit_crypto_evidence(
     _require_submittable(topup)
 
     normalized = normalize_txid(txid)
-    if len(normalized) < 8 or len(normalized) > 200:
+    if not valid_txid(normalized):
         raise TopUpError("هش تراکنش نامعتبر است")
     # A TXID is one transfer: it must not fund two top-ups or an order too.
-    dup_topup = (
-        await session.execute(
-            select(WalletTopUp.id).where(
-                func.lower(WalletTopUp.txid) == normalized.lower(), WalletTopUp.id != topup.id
-            )
-        )
-    ).first()
-    dup_payment = (
-        await session.execute(
-            select(Payment.id).where(func.lower(Payment.txid) == normalized.lower())
-        )
-    ).first()
-    if dup_topup is not None or dup_payment is not None:
+    if await txid_taken(session, normalized, exclude_topup_id=topup.id):
         raise TopUpError("این هش تراکنش قبلاً ثبت شده است")
 
     topup.txid = normalized
@@ -145,7 +136,12 @@ async def submit_crypto_evidence(
     topup.status = PaymentStatus.PENDING_REVIEW
     topup.submitted_at = utcnow()
     topup.rejection_reason = None
-    topup.expires_at = utcnow() + timedelta(hours=48)
+    topup.expires_at = utcnow() + _review_ttl()
+    await notify.enqueue_admins(
+        session,
+        text=f"🧾 هش تراکنش شارژ کیف پول جدید (#{topup.id}) — در انتظار بررسی.",
+        idempotency_key=f"notify:topup:{topup.id}:receipt",
+    )
     try:
         async with session.begin_nested():
             await session.flush()
@@ -210,10 +206,12 @@ async def reject_topup(
     if topup.status not in (PaymentStatus.PENDING_REVIEW, PaymentStatus.AWAITING_PAYMENT_DETAILS):
         raise TopUpError("این شارژ در وضعیت قابل رد نیست")
 
+    old_txid = topup.txid
     topup.status = PaymentStatus.REJECTED
     topup.reviewed_at = utcnow()
     topup.reviewed_by_admin_id = admin_id
     topup.rejection_reason = reason[:500]
+    topup.txid = None  # freed for a legitimate resubmission; kept in audit
     await audit_service.record(
         session,
         actor_type=AuditActor.ADMIN,
@@ -221,7 +219,17 @@ async def reject_topup(
         action="wallet.topup_rejected",
         entity_type="topup",
         entity_id=topup.id,
-        data={"reason": reason[:500]},
+        data={"reason": reason[:500], "txid": old_txid},
+    )
+    await notify.enqueue_user(
+        session,
+        user_id=topup.user_id,
+        text=(
+            "❌ درخواست شارژ کیف پول شما رد شد.\n"
+            f"دلیل: {reason[:500]}\n"
+            "می‌توانید از بخش کیف پول، شارژ جدیدی با رسید صحیح ثبت کنید."
+        ),
+        idempotency_key=f"notify:topup:{topup.id}:rejected",
     )
     await session.flush()
     return topup
@@ -248,3 +256,31 @@ async def count_pending_topups(session: AsyncSession) -> int:
             )
         ).scalar_one()
     )
+
+
+async def expire_stale_topups(session: AsyncSession) -> int:
+    """Expire top-ups that never received evidence (mirrors payments).
+
+    Only ``AWAITING_PAYMENT_DETAILS`` expires; a submitted top-up in
+    ``PENDING_REVIEW`` waits for a human indefinitely. The TXID (if a
+    method switch ever recorded one) is freed.
+    """
+    now = utcnow()
+    rows = (
+        await session.execute(
+            select(WalletTopUp)
+            .where(
+                WalletTopUp.status == PaymentStatus.AWAITING_PAYMENT_DETAILS,
+                WalletTopUp.expires_at.is_not(None),
+                WalletTopUp.expires_at < now,
+            )
+            .with_for_update(skip_locked=True)
+        )
+    ).scalars()
+    count = 0
+    for topup in rows:
+        topup.status = PaymentStatus.EXPIRED
+        topup.txid = None
+        count += 1
+    await session.flush()
+    return count

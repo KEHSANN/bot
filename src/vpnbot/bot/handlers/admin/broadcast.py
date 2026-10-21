@@ -22,6 +22,7 @@ from vpnbot.db.base import utcnow
 from vpnbot.db.enums import CampaignStatus, Permission, RecipientStatus, UserStatus
 from vpnbot.db.models.broadcast import BroadcastCampaign, BroadcastRecipient
 from vpnbot.db.models.users import Admin, User
+from vpnbot.services import screens as screen_service
 
 log = logging.getLogger(__name__)
 router = Router(name="admin.broadcast")
@@ -344,6 +345,13 @@ async def compose_input(
             return
         if len(raw) > MAX_TEXT:
             await message.answer(f"متن بیش از {MAX_TEXT} کاراکتر است.")
+            return
+        try:
+            # Unvalidated HTML here would fail at send time for EVERY
+            # recipient — thousands of retried jobs for one typo'd tag.
+            screen_service._validate_html(raw, "متن همگانی")
+        except screen_service.TemplateError as exc:
+            await message.answer(f"⚠️ {exc}\nمتن را اصلاح و دوباره بفرستید.")
             return
         await state.update_data(broadcast_text=raw, stage="title")
         await message.answer(
