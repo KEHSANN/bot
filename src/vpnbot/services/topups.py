@@ -55,6 +55,22 @@ async def create_topup(
         raise TopUpError(f"حداقل مبلغ شارژ {format_irt_plain(minimum)} تومان است")
     if amount_irt <= 0:
         raise TopUpError("مبلغ معتبر نیست")
+    # Anti-spam cap, mirroring orders: unlimited open top-ups would let
+    # one account flood the review queue and the admins' chats.
+    open_topups = int(
+        (
+            await session.execute(
+                select(func.count(WalletTopUp.id)).where(
+                    WalletTopUp.user_id == user_id,
+                    WalletTopUp.status.in_(
+                        [PaymentStatus.AWAITING_PAYMENT_DETAILS, PaymentStatus.PENDING_REVIEW]
+                    ),
+                )
+            )
+        ).scalar_one()
+    )
+    if open_topups >= 3:
+        raise TopUpError("درخواست شارژ باز دارید؛ منتظر بررسی آن بمانید")
 
     settings = SettingsService(session)
     key = CARD_SETTINGS if method is PaymentMethod.CARD else CRYPTO_SETTINGS
@@ -159,6 +175,17 @@ async def approve_topup(
     ).scalar_one_or_none()
     if topup is None:
         raise TopUpError("درخواست شارژ یافت نشد")
+    # Self-approval guard (mirrors payments): a non-owner admin must
+    # not approve their own top-up and mint themselves balance.
+    from vpnbot.db.models.users import Admin
+
+    admin = await session.get(Admin, admin_id)
+    if (
+        admin is not None
+        and admin.user_id == topup.user_id
+        and not (admin.role is not None and admin.role.key == "owner")
+    ):
+        raise TopUpError("ادمین نمی‌تواند تراکنش خودش را تأیید کند")
     if topup.status is PaymentStatus.APPROVED:
         return topup  # idempotent success
     if topup.status is not PaymentStatus.PENDING_REVIEW:

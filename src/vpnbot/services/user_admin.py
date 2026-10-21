@@ -49,6 +49,7 @@ async def block_user(session: AsyncSession, *, user_id: int, admin_id: int) -> d
     user.status = UserStatus.BLOCKED
 
     receipts_cleared = 0
+    wiped_file_ids: list[str] = []
     payments_cancelled = 0
     payments = (
         await session.execute(
@@ -58,6 +59,7 @@ async def block_user(session: AsyncSession, *, user_id: int, admin_id: int) -> d
     for payment in payments:
         if payment.receipt_file_id:
             receipts_cleared += 1
+            wiped_file_ids.append(payment.receipt_file_id)
             payment.receipt_file_id = None
             payment.receipt_file_type = None
         if payment.status in _PENDING:
@@ -72,6 +74,7 @@ async def block_user(session: AsyncSession, *, user_id: int, admin_id: int) -> d
     for topup in topups:
         if topup.receipt_file_id:
             receipts_cleared += 1
+            wiped_file_ids.append(topup.receipt_file_id)
             topup.receipt_file_id = None
             topup.receipt_file_type = None
         if topup.status in _PENDING:
@@ -91,7 +94,10 @@ async def block_user(session: AsyncSession, *, user_id: int, admin_id: int) -> d
         action="user.blocked",
         entity_type="user",
         entity_id=user.id,
-        data=result,
+        # The wipe is the owner's requested behaviour, but the file
+        # ids are preserved in the (append-only, DB-protected) audit
+        # log — the evidence is recoverable, never silently destroyed.
+        data={**result, "receipt_file_ids": wiped_file_ids},
     )
     await session.flush()
     return result

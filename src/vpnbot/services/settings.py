@@ -88,6 +88,22 @@ class SettingsService:
         await self.session.flush()
         return merged
 
+    async def seed_defaults(self) -> int:
+        """Insert defaults ONLY for keys that have no stored row.
+
+        ``cmd_seed`` used to call ``set(key, {})`` for every group,
+        which rewrites the stored row with pure defaults — re-running
+        the documented seed command wiped the admin's card number,
+        crypto address and every other panel edit. Returns how many
+        groups were inserted.
+        """
+        inserted = 0
+        for key in DEFAULTS:
+            if await self.session.get(AppSetting, key) is None:
+                await self.set(key, {})
+                inserted += 1
+        return inserted
+
     async def update_fields(self, key: str, **fields: Any) -> dict[str, Any]:
         current = await self.get(key)
         current.update(fields)

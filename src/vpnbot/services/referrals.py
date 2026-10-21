@@ -51,6 +51,11 @@ async def grant_for_paid_order(session: AsyncSession, order: Order) -> list[Rewa
 
     grants: list[RewardGrant] = []
     tier1_amount = int(settings.get("tier1_reward_irt", 0))
+    if tier1_amount > 0 and order.total_irt < tier1_amount:
+        # The purchase must at least cover the reward it generates;
+        # otherwise alt accounts could buy the cheapest plan, harvest
+        # a reward worth more than the plan, and farm free balance.
+        return []
     tier1 = await _issue(
         session,
         inviter_id=inviter_id,

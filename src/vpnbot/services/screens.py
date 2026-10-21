@@ -267,8 +267,8 @@ def validate_message(message: dict) -> None:
         if caption:
             validate_text(caption, limit=MAX_CAPTION_LEN, field_name="کپشن")
     delay = message.get("delay_ms", 0)
-    if not isinstance(delay, int) or delay < 0 or delay > 10_000:
-        raise TemplateError("تأخیر پیام باید بین ۰ تا ۱۰۰۰۰ میلی‌ثانیه باشد")
+    if not isinstance(delay, int) or delay < 0 or delay > 3_000:
+        raise TemplateError("تأخیر پیام باید بین ۰ تا ۳۰۰۰ میلی‌ثانیه باشد")
 
 
 def validate_screen(messages: list[dict], buttons: list[dict]) -> None:

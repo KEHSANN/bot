@@ -324,6 +324,27 @@ async def pay_order_with_wallet(
     return payment
 
 
+async def _guard_self_approval(
+    session: AsyncSession, *, admin_id: int, target_user_id: int
+) -> None:
+    """A non-owner admin must not approve their *own* money.
+
+    Without this, a finance/manager admin could order with their
+    personal account and approve their own fake receipt — receiving a
+    decrypted config — even though their role deliberately lacks
+    ``inventory.view_secret``. The owner approving their own purchase
+    is the normal solo-shop case and stays allowed.
+    """
+    from vpnbot.db.models.users import Admin
+
+    admin = await session.get(Admin, admin_id)
+    if admin is None or admin.user_id != target_user_id:
+        return
+    if admin.role is not None and admin.role.key == "owner":
+        return
+    raise PaymentError("ادمین نمی‌تواند تراکنش خودش را تأیید کند")
+
+
 async def approve_payment(
     session: AsyncSession, *, payment_id: int, admin_id: int, note: str | None = None
 ) -> Payment:
@@ -349,6 +370,7 @@ async def approve_payment(
     order = (
         await session.execute(select(Order).where(Order.id == payment.order_id).with_for_update())
     ).scalar_one()
+    await _guard_self_approval(session, admin_id=admin_id, target_user_id=order.user_id)
     if order.status not in (OrderStatus.PENDING_PAYMENT, OrderStatus.PAID):
         raise PaymentError("وضعیت سفارش اجازه تأیید پرداخت را نمی‌دهد")
 
