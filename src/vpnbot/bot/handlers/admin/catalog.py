@@ -58,6 +58,7 @@ async def _show_categories(target: CallbackQuery | Message, session: AsyncSessio
     categories = await catalog_service.list_categories(session, active_only=False)
     total_pages = max(1, (len(categories) + common.ADMIN_PAGE_SIZE - 1) // common.ADMIN_PAGE_SIZE)
     page = min(max(0, page), total_pages - 1)
+    page = common.clamp_page(page)
     window = categories[page * common.ADMIN_PAGE_SIZE : (page + 1) * common.ADMIN_PAGE_SIZE]
     counts = await catalog_service.available_counts(
         session,
@@ -96,7 +97,7 @@ async def _show_products(
         session,
         category_id=category_id or None,
         active_only=False,
-        offset=page * common.ADMIN_PAGE_SIZE,
+        offset=common.clamp_page(page) * common.ADMIN_PAGE_SIZE,
         limit=common.ADMIN_PAGE_SIZE,
     )
     total_pages = max(1, (total + common.ADMIN_PAGE_SIZE - 1) // common.ADMIN_PAGE_SIZE)
@@ -109,7 +110,7 @@ async def _show_products(
             session,
             category_id=category_id or None,
             active_only=False,
-            offset=page * common.ADMIN_PAGE_SIZE,
+            offset=common.clamp_page(page) * common.ADMIN_PAGE_SIZE,
             limit=common.ADMIN_PAGE_SIZE,
         )
     stock = await catalog_service.available_counts(session, [p.id for p in products])

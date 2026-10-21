@@ -32,6 +32,18 @@ from vpnbot.services import auth as auth_service
 log = logging.getLogger(__name__)
 
 ADMIN_PAGE_SIZE = 8
+
+
+def clamp_page(page: int) -> int:
+    """Bound a callback-supplied page BEFORE it reaches a query.
+
+    Page numbers arrive inside callback data an attacker can forge:
+    a huge value made ``page * PAGE_SIZE`` overflow the int64 OFFSET
+    (asyncpg DataError crash) and a negative one made PostgreSQL
+    reject the OFFSET outright. Lists re-clamp against the real page
+    count later anyway; this bound only keeps the arithmetic safe.
+    """
+    return min(max(0, int(page)), 100_000)
 DENIED_TEXT = "⛔️ شما دسترسی لازم برای این بخش را ندارید."
 PANEL_CLOSED = "این پنل بسته شده است. با /admin دوباره باز کنید."
 

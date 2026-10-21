@@ -35,15 +35,18 @@ TG_ID_RE = re.compile(r"^\d{5,15}$")
 
 
 async def _active_owner_count(session: AsyncSession) -> int:
-    return int(
-        (
-            await session.execute(
-                select(func.count(Admin.id))
-                .join(Admin.role)
-                .where(Admin.is_active.is_(True), Admin.role.has(key="owner"))
-            )
-        ).scalar_one()
-    )
+    # Lock the active-owner rows while counting: two owners revoking
+    # each other concurrently could otherwise both count 2, both pass
+    # the last-owner check, and leave the panel with no active owner.
+    rows = (
+        await session.execute(
+            select(Admin.id)
+            .join(Admin.role)
+            .where(Admin.is_active.is_(True), Admin.role.has(key="owner"))
+            .with_for_update()
+        )
+    ).scalars()
+    return len(list(rows))
 
 
 def _user_line(admin: Admin) -> str:
@@ -64,7 +67,7 @@ async def _show_list(
             await session.execute(
                 select(Admin)
                 .order_by(Admin.is_active.desc(), Admin.id)
-                .offset(page * common.ADMIN_PAGE_SIZE)
+                .offset(common.clamp_page(page) * common.ADMIN_PAGE_SIZE)
                 .limit(common.ADMIN_PAGE_SIZE)
             )
         ).scalars()
@@ -159,6 +162,16 @@ def _check_self_and_last_owner(admin: Admin, item: Admin, owners: int) -> str | 
     """Return an error message when the change would lock out the panel."""
     if item.id == admin.id:
         return "نمی‌توانید دسترسی خودتان را حذف یا تغییر دهید."
+    # Root owners come from OWNER_TELEGRAM_IDS in .env: they are the
+    # recovery path for the whole panel, so no panel action — revoke,
+    # demote, or a grant that overwrites their role — may touch them.
+    # They are managed only by editing .env and re-running
+    # bootstrap-owner.
+    from vpnbot.config import get_settings
+
+    root_ids = get_settings().owner_ids
+    if item.user is not None and item.user.telegram_id in root_ids:
+        return "مالک اصلی (تعریف‌شده در تنظیمات سرور) از داخل پنل قابل تغییر نیست."
     if item.is_active and item.role.key == "owner" and owners <= 1:
         return "این حساب تنها مالک فعال است و قابل تغییر نیست."
     return None
@@ -279,6 +292,28 @@ async def admins_router(
         role_key = action.split(":", 1)[1]
         data = await state.get_data()
         telegram_id = int(data.get("grant_telegram_id") or 0)
+        if telegram_id and role_key in ROLE_PRESETS:
+            # Re-granting an EXISTING admin overwrites their role —
+            # the same protections as revoke/demote apply (notably:
+            # a root owner cannot be demoted through this path).
+            from sqlalchemy import select as _select
+
+            from vpnbot.db.models.users import User as _User
+
+            existing = (
+                await session.execute(
+                    _select(Admin)
+                    .join(_User, _User.id == Admin.user_id)
+                    .where(_User.telegram_id == telegram_id)
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                owners = await _active_owner_count(session)
+                problem = _check_self_and_last_owner(admin, existing, owners)
+                if problem is not None:
+                    await state.clear()
+                    await common.alert(callback, problem)
+                    return
         if not telegram_id or role_key not in ROLE_PRESETS:
             await state.clear()
             await common.alert(callback, "درخواست منقضی شده است؛ دوباره شروع کنید.")

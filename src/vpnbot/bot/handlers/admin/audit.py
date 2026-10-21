@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,7 +72,7 @@ async def _show_list(
     events = list(
         (
             await session.execute(
-                stmt.offset(page * common.ADMIN_PAGE_SIZE).limit(common.ADMIN_PAGE_SIZE)
+                stmt.offset(common.clamp_page(page) * common.ADMIN_PAGE_SIZE).limit(common.ADMIN_PAGE_SIZE)
             )
         ).scalars()
     )
@@ -140,9 +141,11 @@ async def audit_router(
     callback_data: AdminCB,
     session: AsyncSession,
     admin: Admin | None,
+    state: FSMContext,
 ) -> None:
     admin = common.guard(admin, Permission.AUDIT_VIEW)
     action = callback_data.action
+    await state.clear()  # section navigation abandons other wizards
 
     if action == "view":
         await _show_event(callback, session, callback_data.item_id)

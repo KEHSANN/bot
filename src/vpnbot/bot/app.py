@@ -59,7 +59,13 @@ def build_storage(settings: Settings) -> BaseStorage | None:
     try:
         from aiogram.fsm.storage.redis import RedisStorage
 
-        return RedisStorage.from_url(settings.redis_url)
+        # Bounded state lifetime: without TTLs, every abandoned
+        # wizard left its FSM keys in Redis forever. 12h is far
+        # longer than any legitimate wizard/checkout pause, and each
+        # interaction refreshes the expiry.
+        return RedisStorage.from_url(
+            settings.redis_url, state_ttl=12 * 3600, data_ttl=12 * 3600
+        )
     except Exception:  # noqa: BLE001 - optional dependency or bad URL
         log.warning("Redis storage unavailable; using in-memory FSM", exc_info=True)
         return None

@@ -19,8 +19,8 @@ from vpnbot.bot.handlers.admin import common
 from vpnbot.bot.keyboards.callbacks import AdminCB
 from vpnbot.bot.states import AdminStates
 from vpnbot.db.base import utcnow
-from vpnbot.db.enums import CampaignStatus, Permission, RecipientStatus, UserStatus
-from vpnbot.db.models.broadcast import BroadcastCampaign, BroadcastRecipient
+from vpnbot.db.enums import CampaignStatus, Permission, UserStatus
+from vpnbot.db.models.broadcast import BroadcastCampaign
 from vpnbot.db.models.users import Admin, User
 from vpnbot.services import screens as screen_service
 
@@ -62,23 +62,12 @@ async def _audience_ids(session: AsyncSession, audience: str, admin: Admin) -> l
 async def _audience_pairs(session: AsyncSession, audience: str, admin: Admin) -> list[tuple[int, int]]:
     """(user_id, telegram_id) pairs for an audience, in ONE query.
 
-    _materialize_recipients used to fetch telegram ids here and then
-    re-query ``User.telegram_id.in_(ids)`` to map them back to user
-    ids — a second query whose IN list breaks asyncpg's 32,767-param
-    cap at ~32k users.
+    Lives in services.broadcast now (the worker materializes
+    recipients); this wrapper keeps the handler-side call sites.
     """
-    if audience == "TEST":
-        return [(admin.user_id, admin.user.telegram_id)]
-    stmt = select(User.id, User.telegram_id).where(User.status == UserStatus.ACTIVE)
-    if audience == "BUYERS":
-        from vpnbot.db.models.orders import Order
+    from vpnbot.services import broadcast as broadcast_service
 
-        stmt = stmt.where(User.id.in_(select(Order.user_id).distinct()))
-    elif audience == "NO_BUY":
-        from vpnbot.db.models.orders import Order
-
-        stmt = stmt.where(User.id.not_in(select(Order.user_id).distinct()))
-    return [(int(r[0]), int(r[1])) for r in (await session.execute(stmt)).all()]
+    return await broadcast_service.audience_pairs(session, audience, test_admin=admin)
 
 
 async def _audience_count(session: AsyncSession, audience: str, admin: Admin) -> int:
@@ -132,7 +121,7 @@ async def _show_list(
             await session.execute(
                 select(BroadcastCampaign)
                 .order_by(BroadcastCampaign.created_at.desc(), BroadcastCampaign.id.desc())
-                .offset(page * common.ADMIN_PAGE_SIZE)
+                .offset(common.clamp_page(page) * common.ADMIN_PAGE_SIZE)
                 .limit(common.ADMIN_PAGE_SIZE)
             )
         ).scalars()
@@ -169,6 +158,9 @@ async def broadcast_router(
 ) -> None:
     admin = common.guard(admin, Permission.BROADCAST_MANAGE)
     action = callback_data.action
+    if not action.startswith("audience:"):
+        # audience:* consumes the compose text held in FSM data.
+        await state.clear()
 
     if action == "new":
         await state.set_state(AdminStates.broadcast_compose)
@@ -191,8 +183,9 @@ async def broadcast_router(
         if campaign.status not in (CampaignStatus.DRAFT, CampaignStatus.PAUSED):
             await common.alert(callback, f"کمپین در وضعیت {STATUS_FA[campaign.status]} است.")
             return
-        if campaign.status is CampaignStatus.DRAFT:
-            await _materialize_recipients(session, campaign, admin)
+        # Recipients are materialized by the worker's dispatch job:
+        # doing it here kept the admin's click transaction (and the
+        # callback answer) hostage for large audiences.
         campaign.status = CampaignStatus.RUNNING
         campaign.started_at = campaign.started_at or utcnow()
         await _enqueue_dispatch(session, campaign)
@@ -286,33 +279,15 @@ async def broadcast_router(
 async def _materialize_recipients(
     session: AsyncSession, campaign: BroadcastCampaign, admin: Admin
 ) -> None:
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    """Compatibility wrapper — materialization lives in the service.
 
-    pairs = await _audience_pairs(session, campaign.audience, admin)
-    if not pairs:
-        campaign.total_recipients = 0
-        return
-    rows = [
-        {
-            "campaign_id": campaign.id,
-            "user_id": user_id,
-            "telegram_id": telegram_id,
-            "status": RecipientStatus.PENDING,
-            "attempts": 0,
-        }
-        for user_id, telegram_id in pairs
-    ]
-    if rows:
-        # Chunked like the inventory import: one INSERT of every
-        # recipient exceeds asyncpg's 32,767-parameter cap at ~6,553
-        # users (5 params per row) and the campaign fails to start.
-        for start in range(0, len(rows), 1000):
-            await session.execute(
-                pg_insert(BroadcastRecipient.__table__)
-                .values(rows[start : start + 1000])
-                .on_conflict_do_nothing(index_elements=["campaign_id", "user_id"])
-            )
-    campaign.total_recipients = len(rows)
+    Campaign start no longer calls this from the click handler (the
+    worker's dispatch job does it); kept for the compose preview and
+    existing tests.
+    """
+    from vpnbot.services import broadcast as broadcast_service
+
+    await broadcast_service.materialize_recipients(session, campaign)
 
 
 async def _enqueue_dispatch(session: AsyncSession, campaign: BroadcastCampaign) -> None:
