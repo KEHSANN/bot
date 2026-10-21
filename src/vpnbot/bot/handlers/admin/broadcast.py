@@ -59,6 +59,28 @@ async def _audience_ids(session: AsyncSession, audience: str, admin: Admin) -> l
     return [int(row[0]) for row in (await session.execute(stmt)).all()]
 
 
+async def _audience_pairs(session: AsyncSession, audience: str, admin: Admin) -> list[tuple[int, int]]:
+    """(user_id, telegram_id) pairs for an audience, in ONE query.
+
+    _materialize_recipients used to fetch telegram ids here and then
+    re-query ``User.telegram_id.in_(ids)`` to map them back to user
+    ids — a second query whose IN list breaks asyncpg's 32,767-param
+    cap at ~32k users.
+    """
+    if audience == "TEST":
+        return [(admin.user_id, admin.user.telegram_id)]
+    stmt = select(User.id, User.telegram_id).where(User.status == UserStatus.ACTIVE)
+    if audience == "BUYERS":
+        from vpnbot.db.models.orders import Order
+
+        stmt = stmt.where(User.id.in_(select(Order.user_id).distinct()))
+    elif audience == "NO_BUY":
+        from vpnbot.db.models.orders import Order
+
+        stmt = stmt.where(User.id.not_in(select(Order.user_id).distinct()))
+    return [(int(r[0]), int(r[1])) for r in (await session.execute(stmt)).all()]
+
+
 async def _audience_count(session: AsyncSession, audience: str, admin: Admin) -> int:
     return len(await _audience_ids(session, audience, admin))
 
@@ -266,26 +288,19 @@ async def _materialize_recipients(
 ) -> None:
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-    telegram_ids = await _audience_ids(session, campaign.audience, admin)
-    if not telegram_ids:
+    pairs = await _audience_pairs(session, campaign.audience, admin)
+    if not pairs:
         campaign.total_recipients = 0
         return
-    users = {
-        int(user.telegram_id): user.id
-        for user in (
-            await session.execute(select(User).where(User.telegram_id.in_(telegram_ids)))
-        ).scalars()
-    }
     rows = [
         {
             "campaign_id": campaign.id,
-            "user_id": users[tg],
-            "telegram_id": tg,
+            "user_id": user_id,
+            "telegram_id": telegram_id,
             "status": RecipientStatus.PENDING,
             "attempts": 0,
         }
-        for tg in telegram_ids
-        if tg in users
+        for user_id, telegram_id in pairs
     ]
     if rows:
         # Chunked like the inventory import: one INSERT of every

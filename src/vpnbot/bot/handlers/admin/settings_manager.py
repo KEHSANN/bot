@@ -69,6 +69,7 @@ CATALOG: tuple[tuple[str, str, tuple[tuple[str, str, str], ...]], ...] = (
         (
             ("wallet_enabled", "کیف پول فعال", "bool"),
             ("referral_enabled", "دعوت از دوستان فعال", "bool"),
+            ("order_ttl_hours", "مهلت تکمیل سفارش (ساعت)", "count"),
             # guide_text / terms_text removed: they were editable here
             # but displayed nowhere — the guide and terms texts live in
             # the screen editor (مراحل راهنما و قوانین).

@@ -318,6 +318,9 @@ async def resume_checkout(
     if order is None or order.status is not OrderStatus.PENDING_PAYMENT:
         await alert(callback, "این سفارش قابل پرداخت نیست")
         return
+    if order.payment is not None and order.payment.status is PaymentStatus.PENDING_REVIEW:
+        await alert(callback, "فیش این سفارش در حال بررسی است؛ منتظر نتیجه بمانید")
+        return
     await state.clear()
     await state.update_data(order_id=order.id, plan_id=order.plan_id, order_ref=order.public_id)
     await callback.answer()

@@ -25,6 +25,39 @@ from vpnbot.services.screens import (
 log = logging.getLogger(__name__)
 router = Router(name="customer.menu")
 
+
+async def cancel_open_order_from_state(
+    session: AsyncSession, user: User, state: FSMContext
+) -> None:
+    """Cancel the in-progress order when a checkout flow is abandoned.
+
+    The ❌ button and /cancel used to only clear the FSM state, leaving
+    the order in PENDING_PAYMENT forever — three abandoned checkouts
+    and the open-order cap locked the customer out of buying entirely.
+    Only a still-unpaid order (payment AWAITING details) is cancelled;
+    a submitted receipt (PENDING_REVIEW) is the admin's to decide.
+    """
+    data = await state.get_data()
+    order_id = data.get("order_id")
+    if not order_id:
+        return
+    from vpnbot.db.enums import PaymentStatus
+    from vpnbot.services import orders as order_service
+
+    order = await order_service.user_order(session, order_id=int(order_id), user_id=user.id)
+    if order is None or order.status is not order_service.OrderStatus.PENDING_PAYMENT:
+        return
+    if order.payment is not None and order.payment.status not in (
+        PaymentStatus.AWAITING_PAYMENT_DETAILS,
+        PaymentStatus.REJECTED,
+    ):
+        return
+    import contextlib
+
+    with contextlib.suppress(order_service.OrderError):
+        # May race with fulfilment — then there is nothing to cancel.
+        await order_service.cancel_order(session, order.id, reason="لغو توسط مشتری")
+
 #: Simple action -> screen mapping for actions with no dynamic content.
 STATIC_ACTIONS = {
     "home": STAGE_MAIN_MENU,
@@ -59,9 +92,16 @@ async def cmd_start(
 
     code = _referral_from_start(command.args)
     if code and code != user.referral_code:
-        bound = await auth_service.bind_referral(session, user, code)
-        if bound:
-            log.info("referral attributed: user=%s inviter_code=%s", user.id, code)
+        from vpnbot.services.settings import REFERRAL_SETTINGS, SHOP_SETTINGS, SettingsService
+
+        settings = SettingsService(session)
+        referral_on = (await settings.get(REFERRAL_SETTINGS)).get("enabled", True) and (
+            await settings.get(SHOP_SETTINGS)
+        ).get("referral_enabled", True)
+        if referral_on:
+            bound = await auth_service.bind_referral(session, user, code)
+            if bound:
+                log.info("referral attributed: user=%s inviter_code=%s", user.id, code)
 
     sender: ScreenSender = sender_for(message.bot, session)
     if not user.is_active:
@@ -97,6 +137,8 @@ async def noop(callback: CallbackQuery) -> None:
 
 @router.callback_query(MenuCB.filter(F.action == "cancel"))
 async def cancel_flow(callback: CallbackQuery, session: AsyncSession, user: User | None, state: FSMContext) -> None:
+    if user is not None:
+        await cancel_open_order_from_state(session, user, state)
     await state.clear()
     await callback.answer("لغو شد")
     if user is None:

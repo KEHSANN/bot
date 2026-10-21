@@ -60,6 +60,12 @@ class OrderPayCB(CallbackData, prefix="opay"):
     order_id: int
 
 
+class OrderCancelCB(CallbackData, prefix="ocx"):
+    """Customer cancels their own unpaid order from the detail screen."""
+
+    order_id: int
+
+
 class WalletBuyCB(CallbackData, prefix="wb"):
     """Buy this plan with the wallet balance. ``confirm`` 0 asks first.
 

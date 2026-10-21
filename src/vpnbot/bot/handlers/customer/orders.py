@@ -16,7 +16,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vpnbot.bot.handlers.customer.common import alert, base_context, money, sender_for
-from vpnbot.bot.keyboards.callbacks import ORDER_PAGE_SIZE, MenuCB, OrderCB, OrderRevealCB, OrdersPageCB
+from vpnbot.bot.keyboards.callbacks import (
+    ORDER_PAGE_SIZE,
+    MenuCB,
+    OrderCancelCB,
+    OrderCB,
+    OrderRevealCB,
+    OrdersPageCB,
+)
 from vpnbot.bot.sender import send_config_pair
 from vpnbot.db.enums import InventoryStatus, OrderStatus, PaymentStatus
 from vpnbot.db.models.inventory import InventoryItem
@@ -138,11 +145,19 @@ async def order_detail(
         return
 
     extra_rows = []
-    if order.status is OrderStatus.PENDING_PAYMENT:
+    payment = order.payment
+    payable = order.status is OrderStatus.PENDING_PAYMENT and (
+        payment is None
+        or payment.status
+        in (PaymentStatus.AWAITING_PAYMENT_DETAILS, PaymentStatus.REJECTED)
+    )
+    if payable:
         # Unpaid or rejected-payment orders get a direct way back into
         # checkout for THIS order — before this, the customer had to
         # re-buy from the shop and the rejected order just sat there.
-        from vpnbot.bot.keyboards.callbacks import OrderPayCB
+        # While a receipt is PENDING_REVIEW the buttons stay hidden:
+        # resubmitting or cancelling mid-review is the admin's call.
+        from vpnbot.bot.keyboards.callbacks import OrderCancelCB, OrderPayCB
 
         extra_rows.append(
             [
@@ -150,6 +165,15 @@ async def order_detail(
                     text="💳 ادامه پرداخت / ارسال فیش",
                     callback_data=OrderPayCB(order_id=order.id).pack(),
                     style="primary",
+                )
+            ]
+        )
+        extra_rows.append(
+            [
+                InlineKeyboardButton(
+                    text="❌ لغو سفارش",
+                    callback_data=OrderCancelCB(order_id=order.id).pack(),
+                    style="danger",
                 )
             ]
         )
@@ -178,6 +202,33 @@ async def order_detail(
         ),
         extra_rows=extra_rows,
     )
+
+
+@router.callback_query(OrderCancelCB.filter())
+async def cancel_own_order(
+    callback: CallbackQuery, callback_data: OrderCancelCB, session: AsyncSession, user: User | None
+) -> None:
+    if user is None:
+        await callback.answer()
+        return
+    order = await order_service.user_order(session, order_id=callback_data.order_id, user_id=user.id)
+    if order is None or order.status is not OrderStatus.PENDING_PAYMENT:
+        await alert(callback, "این سفارش قابل لغو نیست")
+        return
+    payment = order.payment
+    if payment is not None and payment.status not in (
+        PaymentStatus.AWAITING_PAYMENT_DETAILS,
+        PaymentStatus.REJECTED,
+    ):
+        await alert(callback, "پرداخت این سفارش در حال بررسی است و قابل لغو نیست")
+        return
+    try:
+        await order_service.cancel_order(session, order.id, reason="لغو توسط مشتری")
+    except order_service.OrderError as exc:
+        await alert(callback, f"⚠️ {exc}")
+        return
+    await callback.answer("سفارش لغو شد")
+    await _show_page(callback, session, user, 0)
 
 
 @router.callback_query(OrderRevealCB.filter())

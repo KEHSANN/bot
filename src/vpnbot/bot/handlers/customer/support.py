@@ -29,6 +29,10 @@ async def open_support(
     if user is None:
         await callback.answer()
         return
+    config = await SettingsService(session).get(SUPPORT_SETTINGS)
+    if not config.get("enabled", True):
+        await alert(callback, "پشتیبانی در حال حاضر غیرفعال است")
+        return
     await sender_for(callback.bot, session).show(callback, STAGE_SUPPORT, base_context(user))
 
 
@@ -58,6 +62,14 @@ async def receive_ticket(
     message: Message, session: AsyncSession, user: User | None, state: FSMContext
 ) -> None:
     if user is None:
+        return
+    config = await SettingsService(session).get(SUPPORT_SETTINGS)
+    if not config.get("enabled", True):
+        # The ticket-creation point itself is gated (not only the
+        # button): a state armed before the admin disabled support
+        # must not slip a ticket through.
+        await state.clear()
+        await message.answer("پشتیبانی در حال حاضر غیرفعال است.")
         return
     text = (message.text or "").strip()
     if not text:

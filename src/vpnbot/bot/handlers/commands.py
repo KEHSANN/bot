@@ -26,8 +26,20 @@ from vpnbot.bot.handlers.customer.menu import cmd_menu, cmd_start
 from vpnbot.db.models.users import Admin, User
 
 
-async def _cancel(message: Message, state: FSMContext) -> None:
-    """Abort whatever wizard/state the user is in — and nothing else."""
+async def _cancel(
+    message: Message, session: AsyncSession, user: User | None, state: FSMContext
+) -> None:
+    """Abort whatever wizard/state the user is in.
+
+    For customers this also cancels a still-unpaid order bound to the
+    state, so abandoning a checkout frees the open-order slot at once
+    instead of at the TTL sweep. Admin states carry no order_id, so
+    for admins this remains a pure state clear.
+    """
+    if user is not None and session is not None:
+        from vpnbot.bot.handlers.customer.menu import cancel_open_order_from_state
+
+        await cancel_open_order_from_state(session, user, state)
     await state.clear()
     await message.answer("عملیات لغو شد.")
 
