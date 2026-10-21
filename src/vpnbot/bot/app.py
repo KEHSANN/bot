@@ -75,15 +75,18 @@ def build_dispatcher(
     blocked_mw = BlockedUserMiddleware()
     throttle_mw = ThrottleMiddleware()
 
-    # Outer middleware: the same objects, registered on both event types.
-    # Order matters: blocked runs after the admin loader so an admin is
+    # Outer middleware order. Throttle runs FIRST, before any database
+    # work: it keys purely off the Telegram user id on the update, so a
+    # flood is shed without opening a session, upserting the user row or
+    # querying admins — and its short evidence-delay never holds a pooled
+    # connection. Blocked runs after the admin loader so an admin is
     # never gated by their own customer row.
     for observer in (dp.message, dp.callback_query):
+        observer.outer_middleware(throttle_mw)
         observer.outer_middleware(session_mw)
         observer.outer_middleware(user_mw)
         observer.outer_middleware(admin_mw)
         observer.outer_middleware(blocked_mw)
-        observer.outer_middleware(throttle_mw)
     dp.my_chat_member.outer_middleware(session_mw)
     dp.my_chat_member.outer_middleware(user_mw)
 

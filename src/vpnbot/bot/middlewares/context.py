@@ -214,6 +214,13 @@ class ThrottleMiddleware(BaseMiddleware):
         self._callbacks = {u: b for u, b in self._callbacks.items() if b.updated >= cutoff}
         self._messages = {u: b for u, b in self._messages.items() if b.updated >= cutoff}
         self._noticed = {u: ts for u, ts in self._noticed.items() if ts >= cutoff}
+        # Hard bound: even under a flood of distinct accounts the maps
+        # cannot grow without limit — keep only the most recent buckets.
+        for store in (self._callbacks, self._messages):
+            if len(store) > 20000:
+                newest = sorted(store.items(), key=lambda kv: kv[1].updated)[-10000:]
+                store.clear()
+                store.update(newest)
         self._last_gc = now
 
     def _bucket(self, store: dict[int, TokenBucket], cfg: tuple[float, float], uid: int) -> TokenBucket:

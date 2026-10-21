@@ -19,6 +19,11 @@ _DIGIT_MAP.update({ord(a): str(i) for i, a in enumerate(ARABIC_DIGITS)})
 
 RIAL_PER_TOMAN = 10
 
+#: Hard ceiling for any user/admin-typed amount (Toman). Far above any
+#: real plan price or top-up, far below the PostgreSQL BIGINT limit —
+#: see parse_amount_irt.
+MAX_AMOUNT_IRT = 500_000_000
+
 
 class MoneyError(ValueError):
     pass
@@ -64,9 +69,13 @@ def parse_amount_irt(raw: str) -> int:
     if value < 0:
         raise MoneyError("مبلغ نمی‌تواند منفی باشد")
     amount = int(value)
-    if is_rial:
-        return rial_to_toman(amount)
-    return amount
+    result = rial_to_toman(amount) if is_rial else amount
+    if result > MAX_AMOUNT_IRT:
+        # Python ints are unbounded; PostgreSQL BIGINT is not. Without a
+        # cap, a huge typed amount parsed fine here and then crashed the
+        # insert with a raw DataError instead of a clean refusal.
+        raise MoneyError("مبلغ واردشده بیش از سقف مجاز است")
+    return result
 
 
 def toman_to_rial(toman: int) -> int:

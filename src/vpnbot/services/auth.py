@@ -66,6 +66,11 @@ async def bind_referral(session: AsyncSession, user: User, code: str) -> bool:
     ).scalar_one_or_none()
     if inviter is None or inviter.id == user.id:
         return False
+    if inviter.referred_by_id == user.id:
+        # Mutual invites: A invited B, now B tries to invite A back
+        # before either has bought — each would earn a reward from the
+        # other's first purchase. A two-cycle is not a referral.
+        return False
     from vpnbot.db.models.orders import Order
 
     has_orders = (
