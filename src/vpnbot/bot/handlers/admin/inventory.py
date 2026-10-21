@@ -42,7 +42,7 @@ async def _overview(
     target: CallbackQuery | Message, session: AsyncSession, admin: Admin, page: int
 ) -> None:
     products, total = await catalog_service.list_products(
-        session, active_only=False, offset=page * common.ADMIN_PAGE_SIZE, limit=common.ADMIN_PAGE_SIZE
+        session, active_only=False, offset=common.clamp_page(page) * common.ADMIN_PAGE_SIZE, limit=common.ADMIN_PAGE_SIZE
     )
     total_pages = max(1, (total + common.ADMIN_PAGE_SIZE - 1) // common.ADMIN_PAGE_SIZE)
     clamped = min(max(0, page), total_pages - 1)
@@ -51,7 +51,7 @@ async def _overview(
         products, total = await catalog_service.list_products(
             session,
             active_only=False,
-            offset=page * common.ADMIN_PAGE_SIZE,
+            offset=common.clamp_page(page) * common.ADMIN_PAGE_SIZE,
             limit=common.ADMIN_PAGE_SIZE,
         )
     rows = []
@@ -106,7 +106,7 @@ async def _product_items(
                 select(InventoryItem)
                 .where(*conditions)
                 .order_by(InventoryItem.id)
-                .offset(page * common.ADMIN_PAGE_SIZE)
+                .offset(common.clamp_page(page) * common.ADMIN_PAGE_SIZE)
                 .limit(common.ADMIN_PAGE_SIZE)
             )
         ).scalars()

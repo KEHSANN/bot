@@ -43,7 +43,7 @@ async def _show_list(
     total_pages = max(1, (total + common.ADMIN_PAGE_SIZE - 1) // common.ADMIN_PAGE_SIZE)
     page = min(max(0, page), total_pages - 1)
     payments = await payment_service.pending_reviews(
-        session, offset=page * common.ADMIN_PAGE_SIZE, limit=common.ADMIN_PAGE_SIZE
+        session, offset=common.clamp_page(page) * common.ADMIN_PAGE_SIZE, limit=common.ADMIN_PAGE_SIZE
     )
 
     rows = []
@@ -144,7 +144,7 @@ async def _show_topups(
     total_pages = max(1, (total + common.ADMIN_PAGE_SIZE - 1) // common.ADMIN_PAGE_SIZE)
     page = min(max(0, page), total_pages - 1)
     topups = await topup_service.pending_topups(
-        session, offset=page * common.ADMIN_PAGE_SIZE, limit=common.ADMIN_PAGE_SIZE
+        session, offset=common.clamp_page(page) * common.ADMIN_PAGE_SIZE, limit=common.ADMIN_PAGE_SIZE
     )
     rows = []
     for topup in topups:

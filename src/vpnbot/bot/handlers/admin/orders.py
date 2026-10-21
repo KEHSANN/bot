@@ -82,7 +82,7 @@ async def _show_list(
     orders = list(
         (
             await session.execute(
-                stmt.offset(page * common.ADMIN_PAGE_SIZE).limit(common.ADMIN_PAGE_SIZE)
+                stmt.offset(common.clamp_page(page) * common.ADMIN_PAGE_SIZE).limit(common.ADMIN_PAGE_SIZE)
             )
         ).scalars()
     )

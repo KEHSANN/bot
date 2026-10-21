@@ -33,8 +33,18 @@ from vpnbot.services import import_service
 
 router = Router(name="admin.import")
 
-MAX_FILE_BYTES = 5 * 1024 * 1024
-MAX_RECORDS = 20_000
+# Import limits come from the app settings (max_import_file_bytes /
+# max_import_records in .env), not from constants duplicated here.
+def _max_file_bytes() -> int:
+    from vpnbot.config import get_settings
+
+    return get_settings().max_import_file_bytes
+
+
+def _max_records() -> int:
+    from vpnbot.config import get_settings
+
+    return get_settings().max_import_records
 # Raw uploaded configs sit in RAM until confirmed. The old bounds
 # (32 previews x up to 5MB, 30 minutes) let repeated uploads pin
 # hundreds of MB and OOM the container; an admin only ever needs
@@ -161,8 +171,8 @@ async def _prompt_upload(target: CallbackQuery | Message, product: Product, mode
         f"محصول: {common.escape(product.title)}\n"
         f"حالت: <b>{mode}</b>\n\n"
         f"فایل <code>.txt</code> یا <code>.csv</code> را بفرستید (حداکثر "
-        f"{MAX_FILE_BYTES // (1024 * 1024)} مگابایت، حداکثر "
-        f"{common.money(MAX_RECORDS)} رکورد).\n"
+        f"{_max_file_bytes() // (1024 * 1024)} مگابایت، حداکثر "
+        f"{common.money(_max_records())} رکورد).\n"
         "یا متن رکوردها را مستقیم همین‌جا بچسبانید.\n\n"
         "⚠️ محتوای فایل ذخیره نمی‌شود؛ فقط کانفیگ‌های یکتا و رمزنگاری‌شده در انبار ثبت می‌شوند.",
         [common.cancel_row()],
@@ -200,6 +210,9 @@ async def import_router(
 ) -> None:
     admin = common.guard(admin, Permission.INVENTORY_MANAGE)
     action = callback_data.action
+    if not action.startswith("plan:"):
+        # plan:* consumes import_mode chosen in the previous step.
+        await state.clear()
     product = await _load_product(session, callback_data.item_id)
 
     if action == "start":
@@ -347,9 +360,9 @@ async def upload_input(
     raw: str | None = None
     if message.document is not None:
         document = message.document
-        if document.file_size and document.file_size > MAX_FILE_BYTES:
+        if document.file_size and document.file_size > _max_file_bytes():
             await message.answer(
-                f"⚠️ فایل بزرگ‌تر از {MAX_FILE_BYTES // (1024 * 1024)} مگابایت است. "
+                f"⚠️ فایل بزرگ‌تر از {_max_file_bytes() // (1024 * 1024)} مگابایت است. "
                 "آن را به چند بخش تقسیم کنید یا /cancel را بزنید."
             )
             return
@@ -360,7 +373,7 @@ async def upload_input(
             await message.answer("⚠️ دریافت فایل ناموفق بود. دوباره بفرستید یا /cancel.")
             return
         payload = buffer.getvalue()
-        if len(payload) > MAX_FILE_BYTES:
+        if len(payload) > _max_file_bytes():
             await message.answer("⚠️ فایل بیش از حد بزرگ است.")
             return
         for encoding in ("utf-8-sig", "utf-8", "latin-1"):
@@ -385,7 +398,7 @@ async def upload_input(
             raw=raw,
             mode=mode,
             secret=get_settings().fingerprint_secret,
-            max_records=MAX_RECORDS,
+            max_records=_max_records(),
         )
     except import_service.ImportError as exc:
         await message.answer(f"⚠️ {exc}\n\nدوباره بفرستید یا /cancel را بزنید.")
