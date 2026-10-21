@@ -31,6 +31,165 @@ docker compose run --rm bot vpnbot bootstrap-owner
 راهنمای کامل (Docker و نصب مستقیم، بکاپ، عیب‌یابی):
 [docs/deployment-ubuntu.md](docs/deployment-ubuntu.md)
 
+---
+
+## نصب از صفر (مسیر پیشنهادی: Docker)
+
+### گام ۰ — نصب Docker
+
+روی Ubuntu 24.04:
+
+```bash
+sudo apt update
+sudo apt install -y git curl ca-certificates
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker "$USER"
+newgrp docker
+```
+
+### گام ۱ — دریافت کد
+
+```bash
+sudo mkdir -p /opt/vpnbot
+sudo chown "$USER":"$USER" /opt/vpnbot
+git clone https://github.com/KEHSANN/bot.git /opt/vpnbot
+cd /opt/vpnbot
+```
+
+### گام ۲ — ساخت و پر کردن `.env`
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+این مقدارها **حتماً** باید عوض شوند:
+
+| کلید | از کجا / چطور |
+| --- | --- |
+| `BOT_TOKEN` | از [@BotFather](https://t.me/BotFather) |
+| `OWNER_TELEGRAM_IDS` | شناسه عددی تلگرام خودتان (از @userinfobot)؛ چندتا با کاما |
+| `POSTGRES_PASSWORD` | یک رمز قوی دلخواه (خودتان تعیین می‌کنید) |
+| `INVENTORY_ENCRYPTION_KEY` | `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+| `FINGERPRINT_SECRET` | `python3 -c "import secrets; print(secrets.token_urlsafe(48))"` |
+| `BOT_USERNAME` | یوزرنیم ربات بدون `@` |
+
+بقیه مقدارها (از جمله `ENVIRONMENT=production`) همان پیش‌فرض بمانند.
+
+```bash
+chmod 600 .env
+```
+
+### گام ۳ — بالا آوردن سرویس‌ها
+
+```bash
+docker compose build
+docker compose up -d
+docker compose ps
+```
+
+سرویس `migrate` مایگریشن‌های دیتابیس را خودکار اجرا می‌کند و خارج می‌شود؛
+`bot` باید به وضعیت `healthy` برسد.
+
+### گام ۴ — داده اولیه و مالک
+
+```bash
+docker compose run --rm bot vpnbot seed
+docker compose run --rm bot vpnbot bootstrap-owner
+```
+
+هر دو دستور idempotent هستند؛ اجرای دوباره‌شان چیزی را خراب نمی‌کند.
+
+### گام ۵ — بررسی سلامت
+
+```bash
+curl -fsS http://127.0.0.1:8081/readyz
+```
+
+باید `{"status":"ok"}` با `database: ok` و `redis: ok` برگردد.
+
+### گام ۶ — اولین ورود و راه‌اندازی فروشگاه
+
+1. در تلگرام ربات را باز کنید و `/start` بزنید.
+2. با همان حسابی که در `OWNER_TELEGRAM_IDS` گذاشتید، `/admin` بزنید.
+3. در «تنظیمات» شماره کارت / آدرس کریپتو را پر کنید.
+4. در «محصولات» یک دسته، محصول و پلن بسازید.
+5. در «انبار ← ورود کانفیگ» فایل کانفیگ‌ها را وارد کنید.
+
+تا وقتی موجودی وارد نشده باشد خریدی انجام نمی‌شود؛ این عمدی است.
+
+> مسیر جایگزین بدون Docker (نصب مستقیم + systemd) در
+> [docs/deployment-ubuntu.md](docs/deployment-ubuntu.md) آمده است.
+
+---
+
+## به‌روزرسانی امن (بدون آسیب به داده‌ها)
+
+داده‌ها (کاربران، سفارش‌ها، کیف پول، انبار) داخل والیوم داکر `pgdata`
+نگه‌داری می‌شوند، نه داخل کانتینرها. آپدیت کد، کانتینرها را بازسازی
+می‌کند ولی به والیوم دست نمی‌زند — به شرطی که مراحل زیر را رعایت کنید.
+
+### قبل از هر آپدیت: بکاپ
+
+```bash
+cd /opt/vpnbot
+docker compose exec -T db pg_dump -U vpnbot vpnbot | gzip > "backup-$(date +%F-%H%M).sql.gz"
+cp .env "env-backup-$(date +%F).bak"
+```
+
+بکاپ دیتابیس بدون `.env` قابل استفاده نیست: کانفیگ‌های انبار با
+`INVENTORY_ENCRYPTION_KEY` داخل `.env` رمز شده‌اند. هر دو را کنار هم و
+امن نگه دارید.
+
+### آپدیت
+
+```bash
+cd /opt/vpnbot
+git pull --ff-only
+docker compose build
+docker compose up -d
+curl -fsS http://127.0.0.1:8081/readyz
+docker compose logs bot --tail 20
+```
+
+- مایگریشن‌های جدید دیتابیس را سرویس `migrate` هنگام بالا آمدن،
+  **خودکار و قبل از bot و worker** اعمال می‌کند؛ نیازی به دستور دستی
+  نیست و ساختار داده‌های قبلی حفظ می‌شود.
+- اجرای دوباره `vpnbot seed` لازم نیست و اگر اجرا شود هم آسیبی
+  نمی‌زند: فقط کلیدهای تنظیماتی را که وجود ندارند اضافه می‌کند و
+  تنظیماتی را که از پنل تغییر داده‌اید دست نمی‌زند.
+
+### هرگز این کارها را نکنید
+
+| کار | چرا |
+| --- | --- |
+| `docker compose down -v` | فلگ `-v` والیوم `pgdata` را **پاک می‌کند**؛ یعنی کل دیتابیس از بین می‌رود. برای توقف عادی فقط `docker compose down` (بدون `-v`) امن است، ولی برای آپدیت اصلاً نیازی به down نیست |
+| پاک کردن یا از نو ساختن `.env` | توکن، رمز دیتابیس و کلید رمزنگاری انبار داخل آن است؛ از دست رفتنش یعنی قفل شدن روی داده‌های خودتان |
+| تغییر `INVENTORY_ENCRYPTION_KEY` بعد از نصب اول | همه کانفیگ‌های ذخیره‌شده با کلید قبلی رمز شده‌اند و دیگر خوانده نمی‌شوند |
+| تغییر `POSTGRES_PASSWORD` در `.env` به‌تنهایی | این رمز فقط موقع ساخت اولیه والیوم روی دیتابیس اعمال می‌شود؛ عوض کردنش در `.env` فقط اتصال ربات را خراب می‌کند. اگر مجبور به تغییرید، اول با `ALTER USER` داخل دیتابیس عوضش کنید، بعد `.env` را هماهنگ کنید |
+| `git reset --hard` یا clone دوباره روی پوشه نصب | تغییرات محلی و `.env` را از بین می‌برد؛ آپدیت فقط با `git pull --ff-only` |
+
+### اگر آپدیت خراب شد
+
+کد را به کامیت قبلی برگردانید و دوباره بسازید؛ دیتابیس سر جایش است:
+
+```bash
+git log --oneline -5        # کامیت سالم قبلی را پیدا کنید
+git checkout <commit>
+docker compose build
+docker compose up -d
+```
+
+اگر مایگریشن جدیدی اعمال شده بود و نسخه قبلی کد با آن ناسازگار بود،
+بکاپ قبل از آپدیت را برگردانید (دستور بازیابی در
+[docs/deployment-ubuntu.md](docs/deployment-ubuntu.md) بخش ۷).
+
 ## دستورها
 
 | دستور | کار |
