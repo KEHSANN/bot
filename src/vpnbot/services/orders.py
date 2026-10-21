@@ -115,5 +115,46 @@ async def cancel_order(session: AsyncSession, order_id: int, *, reason: str | No
         raise OrderError("سفارش تحویل‌شده قابل لغو نیست")
     order.status = OrderStatus.CANCELLED
     order.notes = reason
+
+    # Release a reserved-but-undelivered inventory item back to the
+    # pool; before this, cancelling a paid order leaked the unit as
+    # RESERVED forever. The assignment row documents the binding, so it
+    # goes with it. (DELIVERED items never reach here — fulfilled orders
+    # are refused above.)
+    from vpnbot.db.enums import InventoryStatus, LedgerKind, PaymentStatus
+    from vpnbot.db.models.inventory import InventoryAssignment
+    from vpnbot.services import inventory as inventory_service
+    from vpnbot.services import wallet as wallet_service
+
+    item = await inventory_service.item_for_order(session, order.id)
+    if item is not None and item.status is InventoryStatus.RESERVED:
+        item.status = InventoryStatus.AVAILABLE
+        item.assigned_order_id = None
+        item.reserved_at = None
+        assignment = (
+            await session.execute(
+                select(InventoryAssignment).where(InventoryAssignment.order_id == order.id)
+            )
+        ).scalar_one_or_none()
+        if assignment is not None:
+            await session.delete(assignment)
+
+    # Wallet-paid orders refund themselves back to the wallet, exactly
+    # once (ledger idempotency key). Card/crypto payments were settled
+    # outside the bot — refunding those stays a manual admin action.
+    payment = order.payment
+    if (
+        payment is not None
+        and payment.method is PaymentMethod.WALLET
+        and payment.status is PaymentStatus.APPROVED
+    ):
+        await wallet_service.credit(
+            session,
+            user_id=order.user_id,
+            amount_irt=order.total_irt,
+            kind=LedgerKind.REFUND,
+            key=f"order:{order.id}:refund",
+            reason=f"استرداد لغو سفارش #{order.public_id}",
+        )
     await session.flush()
     return order

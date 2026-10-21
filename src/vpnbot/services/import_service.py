@@ -29,7 +29,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -277,28 +277,31 @@ async def apply_import(
             }
         )
 
-    stmt = (
-        pg_insert(InventoryItem)
-        .values(rows)
-        .on_conflict_do_nothing(index_elements=["config_fingerprint"])
-        .returning(InventoryItem.id)
-    )
-    inserted = len((await session.execute(stmt)).all())
+    # Insert in chunks: asyncpg caps a statement at 32,767 parameters
+    # and each row binds 8, so a single insert of the allowed 20,000
+    # records crashed above ~4,095 rows. Conflict handling drops the
+    # index target so a clash on EITHER unique fingerprint (config or
+    # sub_url) skips the row instead of aborting the whole import.
+    inserted = 0
+    for offset in range(0, len(rows), 1000):
+        stmt = (
+            pg_insert(InventoryItem)
+            .values(rows[offset : offset + 1000])
+            .on_conflict_do_nothing()
+            .returning(InventoryItem.id)
+        )
+        inserted += len((await session.execute(stmt)).all())
     await session.flush()
 
     available_after = int(
         (
             await session.execute(
-                select(InventoryItem.id)
-                .where(
+                select(func.count(InventoryItem.id)).where(
                     InventoryItem.product_id == product.id,
                     InventoryItem.status == InventoryStatus.AVAILABLE,
                 )
-                .with_only_columns(InventoryItem.id)
             )
-        )
-        .all()
-        .__len__()
+        ).scalar_one()
     )
     return ImportResult(
         imported=inserted,

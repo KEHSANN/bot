@@ -151,6 +151,16 @@ async def _reserve_and_gate(
                 entity_type="order",
                 entity_id=order_id,
             )
+            from vpnbot.services import notify
+
+            await notify.enqueue_admins(
+                session,
+                text=(
+                    f"⚠️ موجودی انبار برای سفارش #{order.public_id} تمام شده است؛ "
+                    "سفارش پرداخت‌شده در انتظار شارژ موجودی است."
+                ),
+                idempotency_key=f"notify:order:{order.id}:no-inventory",
+            )
             return FulfillResult(FulfillOutcome.NO_INVENTORY, order_id, "inventory exhausted")
 
         order.status = OrderStatus.FULFILLMENT_PENDING

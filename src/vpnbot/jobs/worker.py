@@ -45,6 +45,7 @@ from vpnbot.db.models.system import Job
 from vpnbot.security.crypto import CredentialCipher
 from vpnbot.services import fulfillment, notify
 from vpnbot.services import payments as payment_service
+from vpnbot.services import topups as topup_service
 
 log = logging.getLogger(__name__)
 
@@ -214,6 +215,18 @@ class Worker:
                 job.finished_at = utcnow()
                 job.last_error = message
                 log.error("job %s (%s) exhausted retries: %s", job.id, job.kind, message)
+                if job.kind is JobKind.BROADCAST_RECIPIENT:
+                    # The recipient was deliberately left PENDING while
+                    # retries remained (see _broadcast_recipient); now
+                    # that they are exhausted it is truly FAILED.
+                    payload = job.payload or {}
+                    if payload.get("recipient_id") and payload.get("campaign_id"):
+                        await self._mark_recipient(
+                            int(payload["recipient_id"]),
+                            int(payload["campaign_id"]),
+                            RecipientStatus.FAILED,
+                            message[:200],
+                        )
             else:
                 delay = min(MAX_BACKOFF_SECONDS, 2 ** min(job.attempt, 9))
                 job.status = JobStatus.QUEUED
@@ -375,11 +388,22 @@ class Worker:
         except TelegramRetryAfter as exc:
             raise RuntimeError(f"rate limited for {exc.retry_after}s") from exc
         except Exception as exc:  # noqa: BLE001 - recorded per recipient, job retried
-            await self._mark_recipient(
-                recipient_id, campaign_id, RecipientStatus.FAILED, str(exc)[:200]
-            )
+            # A transient failure must NOT mark the recipient FAILED:
+            # the job will be retried, and the retry used to see a
+            # non-PENDING status and silently give up — the message was
+            # lost forever. Record the attempt, keep PENDING, and let
+            # the job layer decide: _fail marks FAILED only when the
+            # job's attempts are exhausted.
+            await self._note_recipient_error(recipient_id, str(exc)[:200])
             raise
         await self._mark_recipient(recipient_id, campaign_id, RecipientStatus.SENT)
+
+    async def _note_recipient_error(self, recipient_id: int, error: str) -> None:
+        async with self.session_factory() as session, session.begin():
+            recipient = await session.get(BroadcastRecipient, recipient_id)
+            if recipient is not None and recipient.status is RecipientStatus.PENDING:
+                recipient.attempts += 1
+                recipient.last_error = error
 
     async def _send_broadcast(self, telegram_id: int, campaign: BroadcastCampaign) -> None:
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -451,9 +475,15 @@ class Worker:
                 RecipientStatus.UNREACHABLE: "skipped_count",
             }.get(status)
             if delta:
-                campaign = await session.get(BroadcastCampaign, campaign_id)
-                if campaign is not None:
-                    setattr(campaign, delta, getattr(campaign, delta) + 1)
+                # Atomic SQL increment: recipient jobs run in parallel
+                # (asyncio.gather) in separate sessions, so a Python-side
+                # read-modify-write on the campaign row lost updates.
+                column = getattr(BroadcastCampaign, delta)
+                await session.execute(
+                    update(BroadcastCampaign)
+                    .where(BroadcastCampaign.id == campaign_id)
+                    .values({delta: column + 1})
+                )
 
             pending = int(
                 (
@@ -468,14 +498,29 @@ class Worker:
             if pending == 0:
                 campaign = await session.get(BroadcastCampaign, campaign_id)
                 if campaign is not None and campaign.status is CampaignStatus.RUNNING:
+                    await session.refresh(campaign)  # fresh counters first
                     campaign.status = CampaignStatus.FINISHED
                     campaign.finished_at = utcnow()
+                    # The dispatch path notifies the owner when it
+                    # completes a campaign itself; when the LAST
+                    # recipient finishes it, nobody did — until now.
+                    if self.settings.owner_ids:
+                        await notify.enqueue(
+                            session,
+                            chat_id=self._owner_chat(),
+                            text=f"📨 کمپین #{campaign.id} پایان یافت.\n"
+                            f"✅ {campaign.sent_count} · ⚠️ {campaign.failed_count} · "
+                            f"⏭ {campaign.skipped_count}",
+                        )
 
     async def _expire_payments(self, payload: dict) -> None:
         async with self.session_factory() as session, session.begin():
             expired = await payment_service.expire_stale_payments(session)
             if expired:
                 log.info("expired %s stale payments", expired)
+            expired_topups = await topup_service.expire_stale_topups(session)
+            if expired_topups:
+                log.info("expired %s stale wallet top-ups", expired_topups)
 
     def _owner_chat(self) -> int:
         ids = self.settings.owner_ids
