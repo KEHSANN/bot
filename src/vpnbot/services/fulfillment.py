@@ -66,6 +66,59 @@ class PaymentGateError(RuntimeError):
     """Raised when fulfilment is attempted without an approved payment."""
 
 
+async def requeue_pending_for_product(session: AsyncSession, *, product_id: int) -> int:
+    """Revive fulfilment for paid orders of a product after restock.
+
+    A paid order that hits an empty shelf raises NO_INVENTORY in the
+    worker, which burns the job's retry attempts (8 with backoff —
+    gone in a few minutes) and leaves the job FAILED for good: the
+    customer paid, and restocking did nothing. Called after a stock
+    import, this resets every FULFILLMENT_PENDING order's job to
+    QUEUED with a fresh attempt budget (or inserts it if missing).
+    Live QUEUED/RUNNING jobs are left alone.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from vpnbot.db.enums import JobKind, JobStatus
+    from vpnbot.db.models.orders import Order
+    from vpnbot.db.models.system import Job
+
+    order_ids = (
+        await session.execute(
+            select(Order.id).where(
+                Order.product_id == product_id,
+                Order.status == OrderStatus.FULFILLMENT_PENDING,
+            )
+        )
+    ).scalars()
+    count = 0
+    for order_id in order_ids:
+        await session.execute(
+            pg_insert(Job)
+            .values(
+                kind=JobKind.FULFILL_ORDER,
+                payload={"order_id": order_id},
+                idempotency_key=f"fulfill:{order_id}",
+                status=JobStatus.QUEUED,
+            )
+            .on_conflict_do_update(
+                index_elements=["idempotency_key"],
+                set_={
+                    "status": JobStatus.QUEUED,
+                    "attempt": 0,
+                    "scheduled_at": utcnow(),
+                    "started_at": None,
+                    "finished_at": None,
+                    "last_error": None,
+                },
+                where=Job.status.in_([JobStatus.FAILED, JobStatus.DONE]),
+            )
+        )
+        count += 1
+    await session.flush()
+    return count
+
+
 async def fulfill_order(
     session_factory: async_sessionmaker[AsyncSession],
     *,

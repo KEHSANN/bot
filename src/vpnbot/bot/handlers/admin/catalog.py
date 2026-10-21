@@ -316,9 +316,11 @@ async def catalog_router(
 ) -> None:
     admin = common.guard(admin, Permission.PRODUCT_MANAGE)
     action = callback_data.action
-    if action == "products":
-        # Section entry point only: pick_cat / pick_type below are
-        # mid-wizard steps that consume the draft in FSM data.
+    if action not in ("pick_cat", "pick_type"):
+        # Section navigation clears other wizards' state; pick_cat /
+        # pick_type are mid-wizard steps that consume the draft.
+        # (The main products entry uses action "" — an earlier
+        # version cleared only for "products" and missed it.)
         await state.clear()
 
     if action == "products":

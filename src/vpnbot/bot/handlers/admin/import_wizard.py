@@ -268,6 +268,12 @@ async def import_router(
         except import_service.ImportError as exc:
             await common.alert(callback, f"⚠️ {exc}")
             return
+        # Restock revives paid orders waiting on this product: their
+        # fulfilment jobs burned all retry attempts while the shelf
+        # was empty and would never run again on their own.
+        from vpnbot.services import fulfillment as fulfillment_service
+
+        await fulfillment_service.requeue_pending_for_product(session, product_id=product.id)
         _drop(token)
         await common.audit(
             session,

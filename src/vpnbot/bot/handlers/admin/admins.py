@@ -101,7 +101,20 @@ async def _show_list(
 async def _show_admin(
     target: CallbackQuery | Message, session: AsyncSession, admin: Admin, admin_id: int
 ) -> None:
-    item = await session.get(Admin, admin_id)
+    # Explicit eager load: after a grant, session.get() returns the
+    # just-created identity-mapped Admin whose user/role were never
+    # loaded, and touching them below raised MissingGreenlet.
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    item = (
+        await session.execute(
+            select(Admin)
+            .where(Admin.id == admin_id)
+            .options(selectinload(Admin.user), selectinload(Admin.role))
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
     if item is None:
         await common.reply(target, "مدیر یافت نشد.", [[common.back("admins")]])
         return
@@ -162,9 +175,12 @@ async def admins_router(
     admin = common.guard(admin, Permission.ADMIN_MANAGE)
     action = callback_data.action
     # Navigating in this section abandons any half-finished wizard
-    # (see the note in the payments router): flow entries re-set
-    # their state after this clear.
-    await state.clear()
+    # (see the note in the payments router) — EXCEPT the grant role
+    # buttons: they consume grant_telegram_id from FSM data that the
+    # preceding message step stored. Clearing unconditionally here
+    # broke "add admin" entirely (id read back as 0 -> "expired").
+    if not action.startswith("grant:"):
+        await state.clear()
 
     if action == "new":
         await state.set_state(AdminStates.admin_grant)
