@@ -152,7 +152,15 @@ async def _show_order(
     rows: list[list] = []
     if order.status in (OrderStatus.FULFILLMENT_PENDING, OrderStatus.PAID):
         rows.append([common.btn("🔁 تلاش مجدد ارسال", "orders", "retry", order.id)])
-    if order.status in (OrderStatus.PENDING_PAYMENT, OrderStatus.PAID):
+    if order.status in (
+        OrderStatus.PENDING_PAYMENT,
+        OrderStatus.PAID,
+        OrderStatus.FULFILLMENT_PENDING,
+    ):
+        # FULFILLMENT_PENDING included: a paid order stuck in the queue
+        # (e.g. out of stock) is exactly the one an admin may need to
+        # cancel — the service releases the reserved unit and refunds
+        # wallet payments. The button used to be hidden for it.
         rows.append([common.btn("⛔️ لغو سفارش", "orders", "cancel", order.id)])
     if payment is not None and payment.status is PaymentStatus.PENDING_REVIEW:
         rows.append([common.btn("💳 بررسی پرداخت", "payments", "view", payment.id)])

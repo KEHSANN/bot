@@ -8,6 +8,7 @@ by an administrator's approval (see ``services.fulfillment``).
 
 from __future__ import annotations
 
+import html
 import logging
 
 from aiogram import F, Router
@@ -200,8 +201,8 @@ async def buy_with_wallet(
         if isinstance(message, Message):
             await message.answer(
                 "👛 <b>خرید با کیف پول</b>\n\n"
-                f"محصول: {product.title}\n"
-                f"پلن: {plan.title}\n"
+                f"محصول: {html.escape(product.title)}\n"
+                f"پلن: {html.escape(plan.title)}\n"
                 f"مبلغ: <b>{format_irt_plain(plan.price_irt)} تومان</b>\n"
                 f"موجودی فعلی: {format_irt_plain(balance)} تومان\n"
                 f"موجودی بعد از خرید: {format_irt_plain(balance - plan.price_irt)} تومان\n\n"

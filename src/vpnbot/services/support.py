@@ -44,6 +44,11 @@ async def create_ticket(
             session, ticket=existing, text=text,
             sender_type=TicketSender.CUSTOMER, sender_id=user.id,
         )
+        # No fixed idempotency key: every follow-up should reach admins.
+        await notify.enqueue_admins(
+            session,
+            text=f"🎫 پیام جدید در تیکت #{existing.id} از کاربر {user.telegram_id}.",
+        )
         return existing
     open_count = int(
         (
@@ -104,7 +109,10 @@ async def add_message(
     ticket.last_message_at = utcnow()
     if sender_type is TicketSender.ADMIN:
         ticket.status = TicketStatus.ANSWERED
-    elif ticket.status is TicketStatus.CLOSED:
+    else:
+        # Any customer message means "waiting for admin" — including a
+        # follow-up on an ANSWERED ticket. Leaving ANSWERED here hid the
+        # message: the admin panel's default list shows OPEN tickets.
         ticket.status = TicketStatus.OPEN
     await session.flush()
     return message

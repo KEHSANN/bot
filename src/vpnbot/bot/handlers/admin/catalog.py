@@ -733,4 +733,10 @@ def _optional_int(raw: str) -> int | None:
         value = int(raw.replace(",", "").replace("٬", ""))
     except ValueError:
         return None
-    return value or None
+    # The old body was ``return value or None``: negatives passed
+    # through (truthy) and huge values reached 32-bit Integer columns
+    # (duration_days / traffic_gb / device_limit) and crashed the
+    # insert with a raw asyncpg DataError.
+    if value <= 0 or value > 1_000_000:
+        return None
+    return value

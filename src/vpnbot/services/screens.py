@@ -179,6 +179,13 @@ def _validate_html(text: str, field_name: str) -> None:
     attribute allowed anywhere is ``href`` on ``<a>`` with a safe scheme.
     """
     stack: list[str] = []
+    # A raw < or > that is not part of a valid tag (e.g. "حجم < 50 گیگ")
+    # passes the tag scan below but Telegram rejects it at send time.
+    stripped = _TAG_RE.sub("", text)
+    if "<" in stripped or ">" in stripped:
+        raise TemplateError(
+            f"کاراکتر < یا > باز در {field_name} مجاز نیست؛ از &lt; یا &gt; استفاده کنید"
+        )
     for match in _TAG_RE.finditer(text):
         raw = match.group(0)
         tag = match.group(1).lower()

@@ -54,10 +54,15 @@ async def _panel(message: Message, session: AsyncSession, admin: Admin | None) -
 
 def build_commands_router() -> Router:
     router = Router(name="global.commands")
-    router.message(_cancel, Command("cancel"))
-    router.message(_start, CommandStart())
-    router.message(_menu, Command("menu"))
-    router.message(_panel, Command("admin", "panel"))
+    # NOTE: router.message(...) is a decorator *factory* in aiogram 3 —
+    # calling it with the handler as an argument registers NOTHING (the
+    # returned decorator is discarded). Registration must go through
+    # .register(). A test pins the handler count so this cannot regress
+    # silently again.
+    router.message.register(_cancel, Command("cancel"))
+    router.message.register(_start, CommandStart())
+    router.message.register(_menu, Command("menu"))
+    router.message.register(_panel, Command("admin", "panel"))
     return router
 
 
