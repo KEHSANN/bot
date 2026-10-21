@@ -280,6 +280,13 @@ class Worker:
             if campaign.status is not CampaignStatus.RUNNING:
                 return
 
+            # Materialize recipients here (not in the admin's start
+            # click — that timed out and rolled back big campaigns).
+            from vpnbot.services import broadcast as broadcast_service
+
+            if await broadcast_service.recipient_count(session, campaign_id) == 0:
+                await broadcast_service.materialize_recipients(session, campaign)
+
             # Fan out every still-pending recipient into its own job. Keys are
             # deterministic, so a retried dispatch never duplicates a send.
             # Recipients stay PENDING until their job runs, so the page cursor
@@ -347,13 +354,14 @@ class Worker:
             if pending == 0:
                 campaign.status = CampaignStatus.FINISHED
                 campaign.finished_at = utcnow()
-                await notify.enqueue(
-                    session,
-                    chat_id=self._owner_chat(),
-                    text=f"📨 کمپین #{campaign.id} پایان یافت.\n"
-                    f"✅ {campaign.sent_count} · ⚠️ {campaign.failed_count} · "
-                    f"⏭ {campaign.skipped_count}",
-                )
+                if self.settings.owner_ids:
+                    await notify.enqueue(
+                        session,
+                        chat_id=self._owner_chat(),
+                        text=f"📨 کمپین #{campaign.id} پایان یافت.\n"
+                        f"✅ {campaign.sent_count} · ⚠️ {campaign.failed_count} · "
+                        f"⏭ {campaign.skipped_count}",
+                    )
 
     async def _broadcast_recipient(self, payload: dict) -> None:
         campaign_id = int(payload["campaign_id"])
@@ -542,7 +550,21 @@ async def sweep_expired_payments_once(
         return await payment_service.expire_stale_payments(session)
 
 
-__all__ = ["RateLimiter", "Worker", "sweep_expired_payments_once"]
+async def sweep_all_once(session_factory: async_sessionmaker[AsyncSession]) -> dict[str, int]:
+    """The full expiry sweep (what the worker's loop runs): payments,
+    wallet top-ups AND stale unpaid orders. The CLI used to run only
+    the payments leg, so `vpnbot sweep` silently skipped the rest."""
+    from vpnbot.services import orders as order_service
+
+    async with session_factory() as session, session.begin():
+        return {
+            "payments": await payment_service.expire_stale_payments(session),
+            "topups": await topup_service.expire_stale_topups(session),
+            "orders": await order_service.expire_stale_orders(session),
+        }
+
+
+__all__ = ["RateLimiter", "Worker", "sweep_all_once", "sweep_expired_payments_once"]
 
 
 def _markup_from_payload(raw: object):

@@ -32,10 +32,25 @@ async def list_products(
 ) -> tuple[list[Product], int]:
     conditions = []
     if active_only:
-        conditions.extend([Product.is_active.is_(True), Product.archived_at.is_(None)])
+        # The customer shop list: a product shows only when it is
+        # active, sales are open, it is not archived AND its category
+        # is active. This used to check just is_active, so products
+        # with sales switched off (or in a disabled category) stayed
+        # listed and only failed later at create_order.
+        conditions.extend(
+            [
+                Product.is_active.is_(True),
+                Product.sales_enabled.is_(True),
+                Product.archived_at.is_(None),
+            ]
+        )
     if category_id is not None:
         conditions.append(Product.category_id == category_id)
     base = select(Product).where(*conditions)
+    if active_only:
+        base = base.outerjoin(Category, Category.id == Product.category_id).where(
+            (Product.category_id.is_(None)) | (Category.is_active.is_(True))
+        )
     total = (await session.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
     stmt = base.order_by(Product.sort_order, Product.id).offset(offset).limit(limit)
     return list((await session.execute(stmt)).scalars()), int(total)

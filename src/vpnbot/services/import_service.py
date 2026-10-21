@@ -99,7 +99,9 @@ _CSV_HEADERS = {
 }
 
 
-def parse_records(raw: str, *, allow_config_only: bool = False) -> list[ParsedRecord]:
+def parse_records(
+    raw: str, *, allow_config_only: bool = False, subscription_links: bool = False
+) -> list[ParsedRecord]:
     records: list[ParsedRecord] = []
     lines = raw.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
@@ -122,6 +124,12 @@ def parse_records(raw: str, *, allow_config_only: bool = False) -> list[ParsedRe
     for line_no, line in enumerate(lines, start=1):
         text = line.strip()
         if not text or text.startswith("#"):
+            continue
+        if subscription_links and text.lower().startswith(("http://", "https://")) and "|" not in text and "\t" not in text:
+            # A subscription product's stock IS the link: a bare URL
+            # line is a complete record (the pair carries the link in
+            # both slots, which is what delivery sends for it).
+            records.append(_record(line_no, text, text, allow_config_only))
             continue
         config, sub = _split_line(text)
         records.append(_record(line_no, config, sub, allow_config_only))
@@ -156,6 +164,17 @@ def _split_line(text: str) -> tuple[str, str]:
             sub = rest.split(sep, 1)[0].strip()
             if sub.lower().startswith(("http://", "https://")):
                 return config.strip(), sub
+    # Pair-shaped lines whose right side is NOT a URL: a "|" or TAB
+    # appearing BEFORE any "#" fragment is the pair separator, so
+    # this was meant to be a pair with a broken link (typo'd scheme).
+    # Surface it as an explicit record error via _record's URL check
+    # instead of silently storing "config|badlink" as one config.
+    # (A separator inside the fragment is part of the server name.)
+    head = text.split("#", 1)[0]
+    for sep in _SEPARATORS:
+        if sep in head:
+            config, _, rest = text.partition(sep)
+            return config.strip(), rest.split(sep, 1)[0].strip()
     return text.strip(), ""
 
 
@@ -179,8 +198,17 @@ async def build_preview(
     max_records: int = 20_000,
     label_filter: str | None = None,
 ) -> Preview:
-    allow_config_only = product.product_type in (ProductType.CONFIG, ProductType.COMBO) or label_filter == "config_only"
-    records = parse_records(raw, allow_config_only=allow_config_only)
+    # CONFIG products are config-only by definition. COMBO means
+    # "config + subscription" — a pair is required, so config-only
+    # lines are errors there (an earlier version let them through
+    # and sold combo stock with no subscription link). SUBSCRIPTION
+    # products take bare link lines (handled in parse_records).
+    allow_config_only = product.product_type is ProductType.CONFIG or label_filter == "config_only"
+    records = parse_records(
+        raw,
+        allow_config_only=allow_config_only,
+        subscription_links=product.product_type is ProductType.SUBSCRIPTION,
+    )
     if not records:
         raise ImportError("هیچ رکوردی در ورودی یافت نشد")
     if len(records) > max_records:

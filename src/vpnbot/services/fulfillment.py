@@ -270,6 +270,11 @@ async def _finalize(
         order = await order_service.get_order(session, order_id, for_update=True)
         if order is None:
             raise PaymentGateError(f"order {order_id} disappeared during delivery")
+        if order.status is OrderStatus.CANCELLED:
+            # Cancelled between the gate and the send (cancel paths
+            # refuse during SENDING / after attempts, so this is
+            # defence in depth): never resurrect it as FULFILLED.
+            return
 
         await inventory_service.mark_delivered(session, order_id=order_id, item_id=item_id)
         order.status = OrderStatus.FULFILLED

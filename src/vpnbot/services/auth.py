@@ -237,5 +237,5 @@ async def revoke_admin(session: AsyncSession, admin_id: int) -> None:
 
 async def inactive_since_cutoff(session: AsyncSession, hours: int) -> list[User]:
     cutoff = utcnow() - timedelta(hours=hours)
-    result = await session.execute(select(User).where(User.last_seen_at >= cutoff))
+    result = await session.execute(select(User).where(User.last_seen_at <= cutoff))
     return list(result.scalars())
