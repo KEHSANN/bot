@@ -20,7 +20,7 @@ from vpnbot.db.models.wallet import WalletTopUp
 from vpnbot.services import audit as audit_service
 from vpnbot.services import notify
 from vpnbot.services import wallet as wallet_service
-from vpnbot.services.payments import _review_ttl, normalize_txid, txid_taken, valid_txid
+from vpnbot.services.payments import _review_ttl, lock_txid, normalize_txid, txid_taken, valid_txid
 from vpnbot.services.settings import (
     CARD_SETTINGS,
     CRYPTO_SETTINGS,
@@ -55,6 +55,11 @@ async def create_topup(
         raise TopUpError(f"حداقل مبلغ شارژ {format_irt_plain(minimum)} تومان است")
     if amount_irt <= 0:
         raise TopUpError("مبلغ معتبر نیست")
+    # Serialize per-user creation (the open cap below is a plain
+    # COUNT under READ COMMITTED and races the same way orders did).
+    from vpnbot.db.models.users import User
+
+    await session.execute(select(User.id).where(User.id == user_id).with_for_update())
     # Abandoned top-ups (amount chosen, method tapped, then /cancel or
     # a menu detour) used to sit in AWAITING_PAYMENT_DETAILS until the
     # review TTL and — counting toward the open cap below — locked the
@@ -161,6 +166,7 @@ async def submit_crypto_evidence(
     normalized = normalize_txid(txid)
     if not valid_txid(normalized):
         raise TopUpError("هش تراکنش نامعتبر است")
+    await lock_txid(session, normalized)
     # A TXID is one transfer: it must not fund two top-ups or an order too.
     if await txid_taken(session, normalized, exclude_topup_id=topup.id):
         raise TopUpError("این هش تراکنش قبلاً ثبت شده است")

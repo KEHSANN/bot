@@ -34,6 +34,9 @@ async def create_ticket(
     if len(text) > MAX_MESSAGE_LEN:
         raise SupportError(f"متن پیام بیش از {MAX_MESSAGE_LEN} کاراکتر است")
 
+    # Serialize per-user (the cap below is a plain COUNT and races).
+    await session.execute(select(User.id).where(User.id == user.id).with_for_update())
+
     # One open conversation per customer: a follow-up message joins the
     # existing open ticket instead of spawning a new one each time (the
     # old behaviour let one user flood the panel with tickets). A hard

@@ -103,7 +103,11 @@ _VAR_RE = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
 
 _ALLOWED_TAGS = {
     "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
-    "code", "pre", "a", "blockquote", "tg-spoiler", "span",
+    "code", "pre", "a", "blockquote", "tg-spoiler",
+    # "span" deliberately absent: Telegram only accepts
+    # <span class="tg-spoiler">, and this validator rejects all
+    # attributes except a/@href — so every span that could pass here
+    # would fail at send time. <tg-spoiler> covers the feature.
 }
 _TAG_RE = re.compile(r"</?([a-zA-Z-]+)((?:\s+[^<>]*)?)>")
 
@@ -189,15 +193,25 @@ def _validate_html(text: str, field_name: str) -> None:
     for match in _TAG_RE.finditer(text):
         raw = match.group(0)
         tag = match.group(1).lower()
+        if raw.endswith("/>"):
+            # Telegram's parser rejects self-closing forms (<b />,
+            # <a href="..."/>) outright; catch them at save time.
+            raise TemplateError(f"تگ خودبسته در {field_name} مجاز نیست: {raw}")
         if tag not in _ALLOWED_TAGS:
             raise TemplateError(f"تگ HTML مجاز نیست در {field_name}: <{tag}>")
         attrs = match.group(2) or ""
+        attr_names = set()
         for attr, value in _ANY_ATTR_RE.findall(attrs):
+            attr_names.add(attr.lower())
             if tag != "a" or attr.lower() != "href":
                 raise TemplateError(f"ویژگی «{attr}» در {field_name} مجاز نیست")
             url = value.strip("\"'")
-            if not url.startswith(("https://", "http://", "tg://")):
+            if not url.startswith(("https://", "http://", "tg://")) or len(url) <= url.index("://") + 3:
                 raise TemplateError("لینک دکمه/متن باید https یا tg باشد")
+        if tag == "a" and not raw.startswith("</") and "href" not in attr_names:
+            # <a> without href passes a naive scan but Telegram
+            # rejects the message at send time.
+            raise TemplateError(f"تگ <a> در {field_name} باید href داشته باشد")
         # Anything left in the attribute area that is not a parsed
         # name="value" pair (unquoted values, stray words) is rejected.
         if _ANY_ATTR_RE.sub("", attrs).strip().rstrip("/").strip():
