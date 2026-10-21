@@ -1897,3 +1897,84 @@ def test_payment_ttl_default_is_six_hours() -> None:
     from vpnbot.config import Settings
 
     assert Settings.model_fields["payment_review_ttl_hours"].default == 6
+
+
+# --- Round 12: TXID lock, order lock, FSM bleed, caps race, misc -----
+
+
+def test_validate_html_rejects_telegram_invalid_forms() -> None:
+    from vpnbot.services.screens import TemplateError, _validate_html
+
+    for bad in (
+        "<a>متن بدون لینک</a>",
+        "<span>متن</span>",
+        '<span class="tg-spoiler">متن</span>',
+        "<b />",
+        '<a href="https://" />',
+        '<a href="https://">خالی</a>',
+    ):
+        try:
+            _validate_html(bad, "تست")
+        except TemplateError:
+            continue
+        raise AssertionError(f"must be rejected: {bad}")
+    _validate_html('<a href="https://example.com">ok</a>', "تست")
+    _validate_html("<tg-spoiler>مخفی</tg-spoiler>", "تست")
+
+
+def test_referral_code_does_not_leak_telegram_id() -> None:
+    from vpnbot.services.auth import make_referral_code
+
+    code = make_referral_code(531353634)
+    assert "531353634" not in code
+    assert len(code) >= 12
+
+
+async def test_upsert_user_is_idempotent(session) -> None:
+    from vpnbot.services import auth as auth_service
+
+    first = await auth_service.upsert_user(session, telegram_id=900001001, first_name="الف")
+    second = await auth_service.upsert_user(session, telegram_id=900001001, first_name="ب")
+    assert first.id == second.id
+    assert second.first_name == "ب"
+
+
+def test_import_preview_cache_is_per_admin() -> None:
+    from vpnbot.bot.handlers.admin import import_wizard as wiz
+
+    wiz._PREVIEWS.clear()
+    item1 = wiz._Cached(admin_id=1, product_id=1, plan_id=None, preview=None, created_at=0)
+    item2 = wiz._Cached(admin_id=1, product_id=2, plan_id=None, preview=None, created_at=0)
+    wiz._cache("tok1", item1)
+    wiz._cache("tok2", item2)
+    assert list(wiz._PREVIEWS) == ["tok2"]  # the new upload replaced the admin's old preview
+    assert wiz.PREVIEW_CAPACITY == 5 and wiz.PREVIEW_TTL == 300
+
+
+async def test_wallet_pay_refused_after_cancel(session) -> None:
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import LedgerKind
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services import wallet as wallet_service
+
+    user = await make_user(session, telegram_id=900001011)
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 1, "paycancel")
+    await wallet_service.credit(
+        session, user_id=user.id, amount_irt=500_000,
+        kind=LedgerKind.TOPUP,
+        key="seed:paycancel", reason="seed",
+    )
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    await order_service.cancel_order(session, order.id, reason="تست")
+    try:
+        await payment_service.pay_order_with_wallet(session, order=order, user_id=user.id)
+    except payment_service.PaymentError:
+        pass
+    else:
+        raise AssertionError("paying a cancelled order must be refused")
+    assert await wallet_service.balance(session, user.id) == 500_000
