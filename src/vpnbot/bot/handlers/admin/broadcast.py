@@ -288,11 +288,15 @@ async def _materialize_recipients(
         if tg in users
     ]
     if rows:
-        await session.execute(
-            pg_insert(BroadcastRecipient.__table__)
-            .values(rows)
-            .on_conflict_do_nothing(index_elements=["campaign_id", "user_id"])
-        )
+        # Chunked like the inventory import: one INSERT of every
+        # recipient exceeds asyncpg's 32,767-parameter cap at ~6,553
+        # users (5 params per row) and the campaign fails to start.
+        for start in range(0, len(rows), 1000):
+            await session.execute(
+                pg_insert(BroadcastRecipient.__table__)
+                .values(rows[start : start + 1000])
+                .on_conflict_do_nothing(index_elements=["campaign_id", "user_id"])
+            )
     campaign.total_recipients = len(rows)
 
 

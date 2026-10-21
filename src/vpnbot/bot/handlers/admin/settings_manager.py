@@ -59,7 +59,8 @@ CATALOG: tuple[tuple[str, str, tuple[tuple[str, str, str], ...]], ...] = (
         "🎫 پشتیبانی",
         (
             ("enabled", "فعال بودن تیکت", "bool"),
-            ("instructions", "پیام خوش‌آمد تیکت", "long"),
+            # The welcome text lives in the screen editor (مرحله پشتیبانی);
+            # a settings field for it existed here but was never read.
         ),
     ),
     (
@@ -68,8 +69,9 @@ CATALOG: tuple[tuple[str, str, tuple[tuple[str, str, str], ...]], ...] = (
         (
             ("wallet_enabled", "کیف پول فعال", "bool"),
             ("referral_enabled", "دعوت از دوستان فعال", "bool"),
-            ("guide_text", "متن راهنمای پرداخت", "long"),
-            ("terms_text", "متن قوانین", "long"),
+            # guide_text / terms_text removed: they were editable here
+            # but displayed nowhere — the guide and terms texts live in
+            # the screen editor (مراحل راهنما و قوانین).
         ),
     ),
     (

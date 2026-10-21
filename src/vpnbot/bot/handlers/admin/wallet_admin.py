@@ -160,7 +160,7 @@ async def wallet_router(
 
     if action == "find":
         await state.set_state(AdminStates.wallet_adjust)
-        await state.update_data(wallet_stage="lookup")
+        await state.set_data({"wallet_stage": "lookup"})
         await callback.answer()
         await common.reply(
             callback,
@@ -231,10 +231,12 @@ async def wallet_router(
             return
         balance = await wallet_service.balance(session, user_id)
         await state.set_state(AdminStates.wallet_adjust)
-        await state.update_data(
-            wallet_stage="amount",
-            wallet_user_id=user_id,
-            wallet_direction=action,
+        await state.set_data(
+            {
+                "wallet_stage": "amount",
+                "wallet_user_id": user_id,
+                "wallet_direction": action,
+            }
         )
         await callback.answer()
         verb = "افزایش" if action == "in" else "کاهش"
@@ -274,6 +276,14 @@ async def _apply_adjustment(
         await common.alert(callback, "کاربر یافت نشد.")
         return
 
+    if not common.is_superuser(admin) and user_id == admin.user_id:
+        # A non-owner admin must not mint money into their own wallet;
+        # the owner adjusting their own balance is the normal solo-shop
+        # case and stays allowed.
+        await state.clear()
+        await common.alert(callback, "⛔️ نمی‌توانید موجودی کیف پول خودتان را تغییر دهید.")
+        return
+
     signed = amount if direction == "in" else -amount
     key = f"adminadj:{admin.id}:{uuid.uuid4().hex}"
     try:
@@ -288,6 +298,10 @@ async def _apply_adjustment(
             ref_id=str(admin.id),
             actor_type="ADMIN",
             actor_id=admin.id,
+            # "out" passes a negative amount on purpose; without this
+            # flag apply() always refused it, so decreasing a balance
+            # from the panel NEVER worked.
+            allow_negative=(direction == "out"),
         )
     except wallet_service.WalletError as exc:
         await common.alert(callback, f"⚠️ {exc}")

@@ -259,7 +259,7 @@ async def topups_router(
             await callback.answer("درخواست شارژ یافت نشد", show_alert=True)
             return
         await state.set_state(AdminStates.payment_note)
-        await state.update_data(topup_id=topup.id)
+        await state.set_data({'topup_id': topup.id})
         await callback.answer()
         await common.reply(
             callback,
@@ -276,7 +276,7 @@ async def topups_router(
             await callback.answer("درخواست شارژ یافت نشد", show_alert=True)
             return
         await state.set_state(AdminStates.rejection_reason)
-        await state.update_data(topup_id=topup.id)
+        await state.set_data({'topup_id': topup.id})
         await callback.answer()
         await common.reply(
             callback,
@@ -330,7 +330,7 @@ async def payments_router(
             await callback.answer("پرداخت یافت نشد", show_alert=True)
             return
         await state.set_state(AdminStates.payment_note)
-        await state.update_data(payment_id=payment.id)
+        await state.set_data({'payment_id': payment.id})
         await callback.answer()
         await common.reply(
             callback,
@@ -347,7 +347,7 @@ async def payments_router(
             await callback.answer("پرداخت یافت نشد", show_alert=True)
             return
         await state.set_state(AdminStates.rejection_reason)
-        await state.update_data(payment_id=payment.id)
+        await state.set_data({'payment_id': payment.id})
         await callback.answer()
         await common.reply(
             callback,

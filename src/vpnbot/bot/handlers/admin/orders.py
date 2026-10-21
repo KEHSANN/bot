@@ -237,7 +237,7 @@ async def orders_router(
     if action == "cancel":
         common.guard(admin, Permission.PAYMENT_REVIEW)
         await state.set_state(AdminStates.rejection_reason)
-        await state.update_data(order_id=callback_data.item_id, cancel_target="order")
+        await state.set_data({"order_id": callback_data.item_id, "cancel_target": "order"})
         await callback.answer()
         await common.reply(
             callback,

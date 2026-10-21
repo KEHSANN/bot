@@ -122,6 +122,11 @@ async def support_router(
 ) -> None:
     admin = common.guard(admin, Permission.SUPPORT_MANAGE)
     action = callback_data.action
+    if action in ("block", "block_yes", "unblock"):
+        # Blocking also wipes the user's receipts — a financial action,
+        # not a support one. A pure support-role admin (no wallet
+        # permission) must not be able to trigger it from a ticket.
+        admin = common.guard(admin, Permission.WALLET_ADJUST)
 
     if action == "view":
         await _show_thread(callback, session, admin, callback_data.item_id)

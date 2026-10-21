@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -116,7 +117,11 @@ async def open_panel(message: Message, session: AsyncSession, admin: Admin | Non
 
 @router.callback_query(AdminCB.filter(F.section == "home"))
 async def home(
-    callback: CallbackQuery, callback_data: AdminCB, session: AsyncSession, admin: Admin | None
+    callback: CallbackQuery,
+    callback_data: AdminCB,
+    session: AsyncSession,
+    admin: Admin | None,
+    state: FSMContext,
 ) -> None:
     if admin is None:
         await common.alert(callback, common.DENIED_TEXT)
@@ -124,6 +129,11 @@ async def home(
     if callback_data.action == "noop":
         await callback.answer()
         return
+    # Going home abandons any in-progress wizard. Without this clear,
+    # the ✖️ انصراف button (which routes here) left e.g. payment_note
+    # armed — the admin's next plain text message then APPROVED
+    # whatever payment they had meant to cancel out of.
+    await state.clear()
     await show_dashboard(callback, session, admin)
 
 
