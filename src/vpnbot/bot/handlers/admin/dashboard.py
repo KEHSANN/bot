@@ -106,12 +106,16 @@ async def show_dashboard(target: CallbackQuery | Message, session: AsyncSession,
 
 
 @router.message(Command("admin", "panel"))
-async def open_panel(message: Message, session: AsyncSession, admin: Admin | None) -> None:
+async def open_panel(
+    message: Message, session: AsyncSession, admin: Admin | None, state: FSMContext
+) -> None:
     if message.chat.type != "private":
         return
     if admin is None:
         await message.answer(common.DENIED_TEXT)
         return
+    # /admin abandons any in-progress wizard, same as the home button.
+    await state.clear()
     await show_dashboard(message, session, admin)
 
 

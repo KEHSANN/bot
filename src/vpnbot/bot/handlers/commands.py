@@ -60,8 +60,10 @@ async def _menu(
     await cmd_menu(message, session, user, state)
 
 
-async def _panel(message: Message, session: AsyncSession, admin: Admin | None) -> None:
-    await open_panel(message, session, admin)
+async def _panel(
+    message: Message, session: AsyncSession, admin: Admin | None, state: FSMContext
+) -> None:
+    await open_panel(message, session, admin, state)
 
 
 def build_commands_router() -> Router:

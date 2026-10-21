@@ -121,7 +121,10 @@ def pager(
 def yes_no(section: str, action: str, item_id: int, *, page: int = 0) -> list[InlineKeyboardButton]:
     return [
         btn("✅ تأیید", section, action, item_id, page),
-        btn("✖️ انصراف", section, "noop", item_id, page),
+        # Cancel goes HOME, not noop: noop only toasted the tap, so the
+        # confirmation dialog stayed on screen and any armed FSM state
+        # (e.g. a rejection reason) stayed armed. Home clears state.
+        btn("✖️ انصراف", "home"),
     ]
 
 

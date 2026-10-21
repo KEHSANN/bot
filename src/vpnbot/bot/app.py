@@ -48,6 +48,11 @@ def build_storage(settings: Settings) -> BaseStorage | None:
 
     A missing Redis must not stop the bot: admin wizards then live in process
     memory and are lost on restart, which is annoying but not unsafe.
+
+    NOTE: ``RedisStorage.from_url`` is lazy — it raises nothing when
+    Redis is down, so construction succeeding proves nothing. Callers
+    that can await should pass the result through
+    :func:`storage_is_alive` before relying on it.
     """
     if not settings.redis_enabled:
         return None
@@ -58,6 +63,26 @@ def build_storage(settings: Settings) -> BaseStorage | None:
     except Exception:  # noqa: BLE001 - optional dependency or bad URL
         log.warning("Redis storage unavailable; using in-memory FSM", exc_info=True)
         return None
+
+
+async def storage_is_alive(storage: BaseStorage | None) -> bool:
+    """Ping a Redis-backed storage; memory storage counts as alive.
+
+    Without this check, a dead Redis passed build_storage silently
+    and the bot then died on the FIRST update's FSM access with a raw
+    ConnectionError — up in the process list, dead in practice.
+    """
+    redis = getattr(storage, "redis", None)
+    if redis is None:
+        return True
+    import asyncio
+
+    try:
+        await asyncio.wait_for(redis.ping(), timeout=2.0)
+        return True
+    except Exception:  # noqa: BLE001 - any failure means "not usable"
+        log.warning("Redis ping failed; FSM storage falls back to memory", exc_info=True)
+        return False
 
 
 def build_dispatcher(
@@ -146,4 +171,4 @@ async def configure_commands(bot, settings: Settings) -> None:
             log.info("could not set admin commands for %s", owner_id)
 
 
-__all__ = ["build_dispatcher", "build_storage", "bot_properties", "configure_commands", "on_error"]
+__all__ = ["build_dispatcher", "build_storage", "bot_properties", "configure_commands", "on_error", "storage_is_alive"]

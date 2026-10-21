@@ -78,7 +78,16 @@ async def _resolve_order(
 
     if existing_id is not None:
         order = await order_service.user_order(session, order_id=existing_id, user_id=user.id)
-        if order is not None and order.status is OrderStatus.PENDING_PAYMENT and order.plan_id == plan.id:
+        if (
+            order is not None
+            and order.status is OrderStatus.PENDING_PAYMENT
+            and order.plan_id == plan.id
+            and order.total_irt == plan.price_irt
+        ):
+            # The price check matters: without it, reusing an open
+            # order after an admin price change would sell at the
+            # order's stale snapshot price instead of the plan's
+            # current one. A drifted order is left to its TTL.
             return order, plan
 
     try:
@@ -203,15 +212,23 @@ async def buy_with_wallet(
         # it — a double-tap meant paying twice.
         from sqlalchemy import select
 
-        from vpnbot.db.models.orders import Order
+        from vpnbot.db.models.orders import Order, Payment
 
         open_order = (
             await session.execute(
                 select(Order)
+                .join(Payment, Payment.order_id == Order.id)
                 .where(
                     Order.user_id == user.id,
                     Order.plan_id == plan.id,
                     Order.status == OrderStatus.PENDING_PAYMENT,
+                    # An order whose receipt is PENDING_REVIEW belongs
+                    # to the admin's queue: reusing it here made the
+                    # wallet confirm fail with "payment under review"
+                    # and blocked buying a second unit with the wallet.
+                    Payment.status.in_(
+                        [PaymentStatus.AWAITING_PAYMENT_DETAILS, PaymentStatus.REJECTED]
+                    ),
                 )
                 .order_by(Order.id.desc())
                 .limit(1)

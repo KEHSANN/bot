@@ -47,8 +47,14 @@ async def _find_user(session: AsyncSession, raw: str) -> User | None:
         return (
             await session.execute(select(User).where(User.telegram_id == int(text)))
         ).scalar_one_or_none()
+    # username is NOT unique in the schema (Telegram lets a handle be
+    # re-registered by someone else after it is released): a
+    # scalar_one_or_none() here crashed with MultipleResultsFound.
+    # Oldest account wins, deterministically.
     return (
-        await session.execute(select(User).where(func.lower(User.username) == text.lower()))
+        await session.execute(
+            select(User).where(func.lower(User.username) == text.lower()).order_by(User.id).limit(1)
+        )
     ).scalar_one_or_none()
 
 

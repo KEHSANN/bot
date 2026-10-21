@@ -201,7 +201,14 @@ async def inventory_router(
             entity_id=callback_data.item_id,
             data={"field": "config" if action == "reveal" else "sub_url"},
         )
-        await common.alert(callback, f"{'کانفیگ' if action == 'reveal' else 'لینک اشتراک'}:\n{value}")
+        await callback.answer()
+        # NOT common.alert: callback answers cap at 200 chars and real
+        # configs run 220-600 — Telegram rejected the alert with
+        # MESSAGE_TOO_LONG and the admin never saw the secret. Send it
+        # as a normal message instead.
+        if isinstance(callback.message, Message):
+            label = "کانفیگ" if action == "reveal" else "لینک اشتراک"
+            await callback.message.answer(f"🔐 <b>{label}:</b>\n<code>{common.escape(value)}</code>")
         return
 
     if action == "disable":

@@ -242,9 +242,42 @@ async def topup_receipt_wrong_type(message: Message) -> None:
     await message.answer("لطفاً رسید را به‌صورت عکس یا فایل بفرستید، نه متن.")
 
 
+@router.message(WalletStates.awaiting_txid, F.photo | F.document)
+async def topup_txid_file(
+    message: Message, session: AsyncSession, user: User | None, state: FSMContext
+) -> None:
+    """Receipt image with the TXID in its caption — the instructions
+    tell the customer to send exactly that, but only F.text was
+    registered here, so the bot silently ignored the photo (the order
+    checkout flow accepted it all along)."""
+    txid = (message.caption or "").strip()
+    if not txid:
+        await message.answer("⚠️ هش تراکنش (TXID) را در توضیح (کپشن) همین فایل بنویسید.")
+        return
+    if message.photo:
+        file_id, file_type = message.photo[-1].file_id, "photo"
+    else:
+        file_id, file_type = message.document.file_id, "document"
+    await _submit_topup_txid(message, session, user, state, txid, file_id, file_type)
+
+
 @router.message(WalletStates.awaiting_txid, F.text)
 async def topup_txid(
     message: Message, session: AsyncSession, user: User | None, state: FSMContext
+) -> None:
+    await _submit_topup_txid(
+        message, session, user, state, (message.text or "").strip(), None, None
+    )
+
+
+async def _submit_topup_txid(
+    message: Message,
+    session: AsyncSession,
+    user: User | None,
+    state: FSMContext,
+    txid: str,
+    file_id: str | None,
+    file_type: str | None,
 ) -> None:
     if user is None:
         return
@@ -252,7 +285,8 @@ async def topup_txid(
     topup_id = int(data.get("topup_id") or 0)
     try:
         await topup_service.submit_crypto_evidence(
-            session, topup_id=topup_id, user_id=user.id, txid=(message.text or "").strip()
+            session, topup_id=topup_id, user_id=user.id, txid=txid,
+            file_id=file_id, file_type=file_type,
         )
     except topup_service.TopUpError as exc:
         await message.answer(f"⚠️ {exc}")
