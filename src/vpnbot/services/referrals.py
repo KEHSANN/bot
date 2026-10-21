@@ -39,6 +39,11 @@ async def grant_for_paid_order(session: AsyncSession, order: Order) -> list[Rewa
     settings = await SettingsService(session).get(REFERRAL_SETTINGS)
     if not settings.get("enabled", True):
         return []
+    from vpnbot.services.settings import SHOP_SETTINGS
+
+    shop = await SettingsService(session).get(SHOP_SETTINGS)
+    if not shop.get("referral_enabled", True):
+        return []
     if order.status not in (OrderStatus.FULFILLMENT_PENDING, OrderStatus.PAID, OrderStatus.FULFILLED):
         return []
 

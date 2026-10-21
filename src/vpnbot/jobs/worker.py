@@ -521,6 +521,11 @@ class Worker:
             expired_topups = await topup_service.expire_stale_topups(session)
             if expired_topups:
                 log.info("expired %s stale wallet top-ups", expired_topups)
+            from vpnbot.services import orders as order_service
+
+            cancelled_orders = await order_service.expire_stale_orders(session)
+            if cancelled_orders:
+                log.info("auto-cancelled %s stale unpaid orders", cancelled_orders)
 
     def _owner_chat(self) -> int:
         ids = self.settings.owner_ids

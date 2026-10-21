@@ -44,6 +44,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     SHOP_SETTINGS: {
         "wallet_enabled": True,
         "referral_enabled": True,
+        "order_ttl_hours": 48,
         "guide_text": "راهنمای پرداخت: کارت‌به‌کارت یا کریپتو، سپس ارسال رسید.",
         "terms_text": "قوانین و شرایط: استفاده از سرویس به معنی پذیرش قوانین است.",
     },

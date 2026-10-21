@@ -127,6 +127,52 @@ async def attach_payment(session: AsyncSession, order: Order) -> Payment:
     return payment
 
 
+async def expire_stale_orders(session: AsyncSession) -> int:
+    """Auto-cancel unpaid orders older than the admin-set TTL.
+
+    The TTL is the shop setting ``order_ttl_hours`` (0 disables it).
+    Only orders whose ball is with the *customer* expire — payment
+    still AWAITING details or REJECTED (they may resubmit until the
+    deadline). A payment in PENDING_REVIEW waits on an admin, not the
+    customer, so those orders never expire here. Without this sweep,
+    abandoned orders (customer tapped cancel, receipt rejected and
+    forgotten) sat in PENDING_PAYMENT forever and eventually blocked
+    the customer via the open-order cap.
+    """
+    from datetime import timedelta
+
+    from vpnbot.db.base import utcnow
+    from vpnbot.db.enums import PaymentStatus
+    from vpnbot.services.settings import SHOP_SETTINGS, SettingsService
+
+    config = await SettingsService(session).get(SHOP_SETTINGS)
+    ttl_hours = int(config.get("order_ttl_hours", 48) or 0)
+    if ttl_hours <= 0:
+        return 0
+    cutoff = utcnow() - timedelta(hours=ttl_hours)
+    orders = (
+        await session.execute(
+            select(Order)
+            .options(selectinload(Order.payment))
+            .where(Order.status == OrderStatus.PENDING_PAYMENT, Order.created_at < cutoff)
+        )
+    ).scalars()
+    cancelled = 0
+    for order in orders:
+        payment = order.payment
+        if payment is not None and payment.status not in (
+            PaymentStatus.AWAITING_PAYMENT_DETAILS,
+            PaymentStatus.REJECTED,
+        ):
+            continue
+        if payment is not None and payment.status is PaymentStatus.AWAITING_PAYMENT_DETAILS:
+            payment.status = PaymentStatus.EXPIRED
+            payment.txid = None
+        await cancel_order(session, order.id, reason="انقضای مهلت تکمیل سفارش")
+        cancelled += 1
+    return cancelled
+
+
 async def cancel_order(session: AsyncSession, order_id: int, *, reason: str | None = None) -> Order:
     order = await get_order(session, order_id, for_update=True)
     if order is None:
