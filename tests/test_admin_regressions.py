@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -1978,3 +1980,108 @@ async def test_wallet_pay_refused_after_cancel(session) -> None:
     else:
         raise AssertionError("paying a cancelled order must be refused")
     assert await wallet_service.balance(session, user.id) == 500_000
+
+
+# --- Round 13: grant regression + restock requeue ----------------------
+
+
+async def test_admins_grant_role_keeps_fsm_data(session) -> None:
+    """Round-12 regression: admins_router cleared FSM state at entry,
+    wiping grant_telegram_id before the role buttons could read it —
+    'add admin' always answered 'request expired'."""
+    from datetime import datetime
+    from unittest.mock import AsyncMock, patch
+
+    from aiogram.fsm.context import FSMContext
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+    from aiogram.types import CallbackQuery, Chat, Message
+    from aiogram.types import User as TgUser
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+    from tests.factories import make_user
+
+    from vpnbot.bot.handlers.admin import admins as admins_handlers
+    from vpnbot.bot.keyboards.callbacks import AdminCB
+    from vpnbot.db.models.users import Admin
+    from vpnbot.services import auth as auth_service
+
+    owner_user = await make_user(session, telegram_id=900001101)
+    target = await make_user(session, telegram_id=900001102)
+    await auth_service.bootstrap_owner(session, telegram_id=owner_user.telegram_id)
+    owner = (
+        await session.execute(
+            select(Admin).where(Admin.user_id == owner_user.id).options(selectinload(Admin.role))
+        )
+    ).scalar_one()
+
+    storage = MemoryStorage()
+    ctx = FSMContext(storage=storage, key=StorageKey(bot_id=1, chat_id=1, user_id=1))
+    await ctx.update_data(grant_telegram_id=target.telegram_id, stage="role")
+
+    message = Message(
+        message_id=1,
+        date=datetime.now(UTC),
+        chat=Chat(id=1, type="private"),
+        from_user=TgUser(id=owner_user.telegram_id, is_bot=False, first_name="x"),
+        text="panel",
+    )
+    callback = CallbackQuery(
+        id="cb1",
+        from_user=TgUser(id=owner_user.telegram_id, is_bot=False, first_name="x"),
+        chat_instance="ci",
+        message=message,
+        data="a|admins|grant:manager|0|0",
+    )
+    with (
+        patch.object(Message, "edit_text", new=AsyncMock()),
+        patch.object(CallbackQuery, "answer", new=AsyncMock()),
+    ):
+        await admins_handlers.admins_router(
+            callback,
+            AdminCB(section="admins", action="grant:manager", item_id=0, page=0),
+            session,
+            owner,
+            ctx,
+        )
+    granted = (
+        await session.execute(select(Admin).where(Admin.user_id == target.id))
+    ).scalar_one_or_none()
+    assert granted is not None  # the role tap found the stored telegram id
+
+
+async def test_requeue_pending_after_restock(session) -> None:
+    from sqlalchemy import select
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import JobKind, JobStatus, OrderStatus
+    from vpnbot.db.models.system import Job
+    from vpnbot.services import fulfillment as fulfillment_service
+    from vpnbot.services import orders as order_service
+
+    user = await make_user(session, telegram_id=900001111)
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 1, "restockrq")
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    order.status = OrderStatus.FULFILLMENT_PENDING
+    burned = Job(
+        kind=JobKind.FULFILL_ORDER,
+        payload={"order_id": order.id},
+        idempotency_key=f"fulfill:{order.id}",
+        status=JobStatus.FAILED,
+        attempt=8,
+        max_attempts=8,
+        last_error="no inventory available for paid order",
+    )
+    session.add(burned)
+    await session.flush()
+
+    revived = await fulfillment_service.requeue_pending_for_product(session, product_id=product.id)
+    assert revived == 1
+    await session.refresh(burned)
+    assert burned.status is JobStatus.QUEUED
+    assert burned.attempt == 0
+    assert burned.last_error is None
+    _ = select
