@@ -1043,7 +1043,7 @@ async def test_cancel_command_handler_only_clears_state() -> None:
         answers.append(text)
 
     message = SimpleNamespace(answer=fake_answer)
-    await cmd_cancel(message, ctx)
+    await cmd_cancel(message, None, None, ctx)
     assert await ctx.get_state() is None
     assert await ctx.get_data() == {}
     assert answers == ["عملیات لغو شد."]
@@ -1530,3 +1530,240 @@ async def test_referral_three_cycle_and_small_order(session) -> None:
     await session.flush()
     assert await referral_service.grant_for_paid_order(session, cheap) == []
 
+
+
+# --- Round 10: order TTL, customer cancel paths, broadcast pairs -----
+
+
+async def _card_settings(session) -> None:
+    from vpnbot.services.settings import CARD_SETTINGS, SettingsService
+
+    await SettingsService(session).set(
+        CARD_SETTINGS,
+        {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
+    )
+
+
+async def test_order_ttl_sweep(session) -> None:
+    from datetime import timedelta
+
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.base import utcnow
+    from vpnbot.db.enums import OrderStatus, PaymentMethod, PaymentStatus
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services.auth import bootstrap_owner
+    from vpnbot.services.settings import SHOP_SETTINGS, SettingsService
+
+    admin = await bootstrap_owner(session, telegram_id=900000801)
+    await _card_settings(session)
+    await SettingsService(session).update_fields(SHOP_SETTINGS, order_ttl_hours=48)
+    user = await make_user(session, telegram_id=900000802)
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 5, "ttl")
+
+    async def _order_with_payment(submit: bool, reject: bool = False):
+        order = await order_service.create_order(
+            session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+        )
+        payment = await payment_service.start_payment(
+            session, order=order, method=PaymentMethod.CARD
+        )
+        if submit:
+            await payment_service.submit_card_receipt(
+                session, payment_id=payment.id, user_id=user.id,
+                file_id="ttl-r", file_type="photo",
+            )
+        if reject:
+            await payment_service.reject_payment(
+                session, payment_id=payment.id, admin_id=admin.id, reason="x"
+            )
+        order.created_at = utcnow() - timedelta(hours=100)
+        await session.flush()
+        return order, payment
+
+    old_awaiting, pay_a = await _order_with_payment(submit=False)
+    old_review, pay_r = await _order_with_payment(submit=True)
+    old_rejected, pay_j = await _order_with_payment(submit=True, reject=True)
+    other = await make_user(session, telegram_id=900000803)
+    fresh = await order_service.create_order(
+        session, user_id=other.id, plan_id=plan.id, product=product, plan=plan
+    )
+
+    cancelled = await order_service.expire_stale_orders(session)
+    assert cancelled == 2  # awaiting + rejected; review and fresh survive
+    for order in (old_awaiting, old_rejected):
+        await session.refresh(order)
+        assert order.status is OrderStatus.CANCELLED
+    await session.refresh(pay_a)
+    assert pay_a.status is PaymentStatus.EXPIRED
+    await session.refresh(old_review)
+    assert old_review.status is OrderStatus.PENDING_PAYMENT  # admin's queue, not expired
+    await session.refresh(fresh)
+    assert fresh.status is OrderStatus.PENDING_PAYMENT
+
+    # TTL of 0 disables the sweep entirely.
+    await SettingsService(session).update_fields(SHOP_SETTINGS, order_ttl_hours=0)
+    assert await order_service.expire_stale_orders(session) == 0
+
+
+async def test_cancel_open_order_from_state(session) -> None:
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.bot.handlers.customer.menu import cancel_open_order_from_state
+    from vpnbot.db.enums import OrderStatus, PaymentMethod
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+
+    await _card_settings(session)
+    user = await make_user(session, telegram_id=900000811)
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 3, "statecancel")
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    await payment_service.start_payment(session, order=order, method=PaymentMethod.CARD)
+
+    state = _memory_state()
+    await state.update_data(order_id=order.id)
+    await cancel_open_order_from_state(session, user, state)
+    await session.refresh(order)
+    assert order.status is OrderStatus.CANCELLED
+
+
+async def test_order_detail_payment_buttons(session, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.bot.handlers.customer import orders as customer_orders
+    from vpnbot.bot.keyboards.callbacks import OrderCB
+    from vpnbot.db.enums import PaymentMethod
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services.auth import bootstrap_owner
+
+    admin = await bootstrap_owner(session, telegram_id=900000821)
+    await _card_settings(session)
+    user = await make_user(session, telegram_id=900000822)
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 3, "btns")
+
+    captured: dict = {}
+
+    class _FakeSender:
+        async def show(self, target, stage, context=None, extra_rows=None, **kw):
+            captured["rows"] = extra_rows or []
+
+    monkeypatch.setattr(customer_orders, "sender_for", lambda bot, s: _FakeSender())
+
+    async def _buttons_for(order_id: int) -> list[str]:
+        callback = SimpleNamespace(bot=object())
+        await customer_orders.order_detail(
+            callback, OrderCB(order_id=order_id), session, user
+        )
+        return [
+            btn.callback_data
+            for row in captured["rows"]
+            for btn in row
+            if getattr(btn, "callback_data", None)
+        ]
+
+    # Rejected payment: resubmit + cancel buttons visible.
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    payment = await payment_service.start_payment(session, order=order, method=PaymentMethod.CARD)
+    await payment_service.submit_card_receipt(
+        session, payment_id=payment.id, user_id=user.id, file_id="b1", file_type="photo"
+    )
+    buttons = await _buttons_for(order.id)
+    assert not any(b.startswith("opay:") for b in buttons)  # in review: hidden
+
+    await payment_service.reject_payment(
+        session, payment_id=payment.id, admin_id=admin.id, reason="x"
+    )
+    buttons = await _buttons_for(order.id)
+    assert any(b.startswith("opay:") for b in buttons)
+    assert any(b.startswith("ocx:") for b in buttons)
+
+
+async def test_referral_grant_respects_shop_flag(session) -> None:
+    from tests.factories import make_user
+
+    from vpnbot.db.enums import OrderStatus
+    from vpnbot.db.models.orders import Order
+    from vpnbot.services import referrals as referral_service
+    from vpnbot.services.auth import bind_referral
+    from vpnbot.services.settings import SHOP_SETTINGS, SettingsService
+
+    a = await make_user(session, telegram_id=900000831)
+    b = await make_user(session, telegram_id=900000832)
+    assert await bind_referral(session, user=b, code=a.referral_code)
+    from tests.factories import make_catalog
+
+    _, product, plan = await make_catalog(session)
+    order = Order(
+        user_id=b.id, product_id=product.id, plan_id=plan.id, public_id="TEST-SHOPFLAG",
+        product_title_snapshot="x", plan_title_snapshot=None,
+        unit_price_irt=250_000, total_irt=250_000, status=OrderStatus.FULFILLMENT_PENDING,
+    )
+    session.add(order)
+    await session.flush()
+
+    await SettingsService(session).update_fields(SHOP_SETTINGS, referral_enabled=False)
+    assert await referral_service.grant_for_paid_order(session, order) == []
+    await SettingsService(session).update_fields(SHOP_SETTINGS, referral_enabled=True)
+    assert await referral_service.grant_for_paid_order(session, order) != []
+
+
+async def test_support_receive_ticket_blocked_when_disabled(session) -> None:
+    from types import SimpleNamespace
+
+    from tests.factories import make_user
+
+    from vpnbot.bot.handlers.customer import support as customer_support
+    from vpnbot.services import support as support_service
+    from vpnbot.services.settings import SUPPORT_SETTINGS, SettingsService
+
+    user = await make_user(session, telegram_id=900000841)
+    await SettingsService(session).update_fields(SUPPORT_SETTINGS, enabled=False)
+    answers: list[str] = []
+
+    async def _answer(text, **kw):
+        answers.append(text)
+
+    message = SimpleNamespace(text="کمک می‌خوام", answer=_answer)
+    state = _memory_state()
+    await customer_support.receive_ticket(message, session, user, state)
+    assert answers and "غیرفعال" in answers[0]
+    assert await support_service.count_tickets(session) == 0
+
+
+async def test_broadcast_materialize_pairs(session) -> None:
+    from sqlalchemy import func, select
+    from tests.factories import make_user
+
+    from vpnbot.bot.handlers.admin import broadcast as broadcast_handlers
+    from vpnbot.db.models.broadcast import BroadcastCampaign, BroadcastRecipient
+    from vpnbot.services.auth import bootstrap_owner
+
+    admin = await bootstrap_owner(session, telegram_id=900000851)
+    for i in range(3):
+        await make_user(session, telegram_id=900000852 + i)
+    campaign = BroadcastCampaign(
+        title="t", message_text="سلام", audience="ALL", created_by_admin_id=admin.id
+    )
+    session.add(campaign)
+    await session.flush()
+    await broadcast_handlers._materialize_recipients(session, campaign, admin)
+    count = (
+        await session.execute(
+            select(func.count(BroadcastRecipient.id)).where(
+                BroadcastRecipient.campaign_id == campaign.id
+            )
+        )
+    ).scalar_one()
+    assert count == 4  # 3 customers + the owner is a user too
+    assert campaign.total_recipients == 4
