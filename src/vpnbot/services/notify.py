@@ -68,6 +68,41 @@ async def enqueue_many(session: AsyncSession, messages: list[tuple[int, str]]) -
         await enqueue(session, chat_id=chat_id, text=text)
 
 
+async def enqueue_admins(
+    session: AsyncSession, *, text: str, idempotency_key: str | None = None
+) -> None:
+    """Queue the same notice to every active admin's Telegram chat."""
+    from vpnbot.db.models.users import Admin, User
+
+    chat_ids = (
+        await session.execute(
+            select(User.telegram_id)
+            .join(Admin, Admin.user_id == User.id)
+            .where(Admin.is_active.is_(True))
+        )
+    ).scalars()
+    for chat_id in chat_ids:
+        await enqueue(
+            session,
+            chat_id=int(chat_id),
+            text=text,
+            idempotency_key=f"{idempotency_key}:{chat_id}" if idempotency_key else None,
+        )
+
+
+async def enqueue_user(
+    session: AsyncSession, *, user_id: int, text: str, idempotency_key: str | None = None
+) -> None:
+    """Queue a notice to a customer by their internal user id."""
+    from vpnbot.db.models.users import User
+
+    telegram_id = (
+        await session.execute(select(User.telegram_id).where(User.id == user_id))
+    ).scalar_one_or_none()
+    if telegram_id is not None:
+        await enqueue(session, chat_id=int(telegram_id), text=text, idempotency_key=idempotency_key)
+
+
 async def pending_count(session: AsyncSession) -> int:
     from sqlalchemy import func
 

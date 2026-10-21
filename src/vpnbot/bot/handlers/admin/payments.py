@@ -106,13 +106,13 @@ async def _show_payment(
     if payment.method is PaymentMethod.CARD:
         lines.extend(
             [
-                f"مقصد: {details.get('card_number', '—')} ({details.get('recipient_name', '—')})",
+                f"مقصد: {common.escape(str(details.get('card_number', '—')))} ({common.escape(str(details.get('recipient_name', '—')))})",
             ]
         )
     else:
         lines.extend(
             [
-                f"شبکه: {details.get('network', '—')} · {details.get('asset', '—')}",
+                f"شبکه: {common.escape(str(details.get('network', '—')))} · {common.escape(str(details.get('asset', '—')))}",
                 f"TXID: <code>{common.escape(payment.txid or '—')}</code>",
             ]
         )
@@ -196,11 +196,11 @@ async def _show_topup(
         f"ارسال رسید: {common.date(topup.submitted_at)}",
     ]
     if topup.method is PaymentMethod.CARD:
-        lines.append(f"مقصد: {details.get('card_number', '—')} ({details.get('recipient_name', '—')})")
+        lines.append(f"مقصد: {common.escape(str(details.get('card_number', '—')))} ({common.escape(str(details.get('recipient_name', '—')))})")
     else:
         lines.extend(
             [
-                f"شبکه: {details.get('network', '—')} · {details.get('asset', '—')}",
+                f"شبکه: {common.escape(str(details.get('network', '—')))} · {common.escape(str(details.get('asset', '—')))}",
                 f"TXID: <code>{common.escape(topup.txid or '—')}</code>",
             ]
         )

@@ -8,6 +8,8 @@ wallet exactly once (ledger idempotency key ``topup:<id>``).
 
 from __future__ import annotations
 
+import html
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -187,10 +189,10 @@ async def topup_method(
         await message.answer(
             "💳 <b>کارت به کارت</b>\n\n"
             f"مبلغ: <b>{format_irt_plain(amount)} تومان</b>\n"
-            f"به نام: {details.get('recipient_name', '—')}\n"
-            f"شماره کارت: <code>{details.get('card_number', '—')}</code>\n"
-            f"بانک: {details.get('bank_name', '—')}\n\n"
-            f"{details.get('instructions', '')}\n\n"
+            f"به نام: {html.escape(str(details.get('recipient_name', '—')))}\n"
+            f"شماره کارت: <code>{html.escape(str(details.get('card_number', '—')))}</code>\n"
+            f"بانک: {html.escape(str(details.get('bank_name', '—')))}\n\n"
+            f"{html.escape(str(details.get('instructions', '')))}\n\n"
             "پس از واریز، تصویر یا فایل رسید را همینجا بفرستید."
         )
     else:
@@ -199,9 +201,9 @@ async def topup_method(
         await message.answer(
             "₿ <b>پرداخت رمزارز</b>\n\n"
             f"مبلغ شارژ: <b>{format_irt_plain(amount)} تومان</b>\n"
-            f"دارایی: {details.get('asset', 'USDT')} · شبکه: {details.get('network', '—')}\n"
-            f"آدرس: <code>{details.get('address', '—')}</code>\n\n"
-            f"{details.get('instructions', '')}\n\n"
+            f"دارایی: {html.escape(str(details.get('asset', 'USDT')))} · شبکه: {html.escape(str(details.get('network', '—')))}\n"
+            f"آدرس: <code>{html.escape(str(details.get('address', '—')))}</code>\n\n"
+            f"{html.escape(str(details.get('instructions', '')))}\n\n"
             "پس از انتقال، هش تراکنش (TXID) را به‌صورت متن بفرستید."
         )
 

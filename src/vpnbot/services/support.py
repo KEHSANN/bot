@@ -9,9 +9,11 @@ from vpnbot.db.base import utcnow
 from vpnbot.db.enums import TicketSender, TicketStatus
 from vpnbot.db.models.support import Ticket, TicketMessage
 from vpnbot.db.models.users import User
+from vpnbot.services import notify
 
 MAX_MESSAGE_LEN = 3000
 MAX_SUBJECT_LEN = 200
+MAX_OPEN_TICKETS = 3
 
 
 class SupportError(ValueError):
@@ -32,6 +34,29 @@ async def create_ticket(
     if len(text) > MAX_MESSAGE_LEN:
         raise SupportError(f"متن پیام بیش از {MAX_MESSAGE_LEN} کاراکتر است")
 
+    # One open conversation per customer: a follow-up message joins the
+    # existing open ticket instead of spawning a new one each time (the
+    # old behaviour let one user flood the panel with tickets). A hard
+    # cap remains as a backstop for races.
+    existing = await open_ticket_for_user(session, user.id)
+    if existing is not None:
+        await add_message(
+            session, ticket=existing, text=text,
+            sender_type=TicketSender.CUSTOMER, sender_id=user.id,
+        )
+        return existing
+    open_count = int(
+        (
+            await session.execute(
+                select(func.count(Ticket.id)).where(
+                    Ticket.user_id == user.id, Ticket.status != TicketStatus.CLOSED
+                )
+            )
+        ).scalar_one()
+    )
+    if open_count >= MAX_OPEN_TICKETS:
+        raise SupportError("تعداد تیکت‌های باز شما به سقف رسیده است؛ منتظر پاسخ بمانید")
+
     now = utcnow()
     ticket = Ticket(
         user_id=user.id,
@@ -50,6 +75,11 @@ async def create_ticket(
         )
     )
     await session.flush()
+    await notify.enqueue_admins(
+        session,
+        text=f"🎫 تیکت پشتیبانی جدید #{ticket.id} از کاربر {user.telegram_id}.",
+        idempotency_key=f"notify:ticket:{ticket.id}:created",
+    )
     return ticket
 
 
