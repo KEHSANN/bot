@@ -40,7 +40,7 @@ async def _show_list(
     total_pages = max(1, (total + common.ADMIN_PAGE_SIZE - 1) // common.ADMIN_PAGE_SIZE)
     page = min(max(0, page), total_pages - 1)
     tickets = await support_service.list_tickets(
-        session, status=status, offset=page * common.ADMIN_PAGE_SIZE, limit=common.ADMIN_PAGE_SIZE
+        session, status=status, offset=common.clamp_page(page) * common.ADMIN_PAGE_SIZE, limit=common.ADMIN_PAGE_SIZE
     )
 
     rows = [

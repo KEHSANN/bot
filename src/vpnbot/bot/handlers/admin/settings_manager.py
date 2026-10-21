@@ -185,6 +185,7 @@ async def settings_router(
 ) -> None:
     admin = common.guard(admin, Permission.SETTINGS_MANAGE)
     action = callback_data.action
+    await state.clear()  # section navigation abandons other wizards
 
     if action.startswith("open:"):
         await _show_section(callback, session, int(action.split(":", 1)[1]))

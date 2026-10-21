@@ -67,7 +67,7 @@ async def _show_menu(target: CallbackQuery | Message, session: AsyncSession, pag
             await session.execute(
                 select(WalletAccount)
                 .order_by(WalletAccount.balance_irt.desc(), WalletAccount.id)
-                .offset(page * common.ADMIN_PAGE_SIZE)
+                .offset(common.clamp_page(page) * common.ADMIN_PAGE_SIZE)
                 .limit(common.ADMIN_PAGE_SIZE)
             )
         ).scalars()
@@ -296,7 +296,15 @@ async def _apply_adjustment(
         return
 
     signed = amount if direction == "in" else -amount
-    key = f"adminadj:{admin.id}:{uuid.uuid4().hex}"
+    token = str(data.get("wallet_adjust_token") or "")
+    if not token:
+        await state.clear()
+        await common.alert(callback, "درخواست منقضی شده است؛ دوباره شروع کنید.")
+        return
+    key = f"adminadj:{admin.id}:{token}"
+    # Disarm BEFORE applying: a second tap then finds no wizard data
+    # and stops at the "expired" branch instead of re-applying.
+    await state.clear()
     try:
         result = await wallet_service.apply(
             session,
@@ -372,7 +380,17 @@ async def wallet_input(
         if direction == "out" and amount > await wallet_service.balance(session, user_id):
             await message.answer("موجودی کافی نیست. مبلغ کمتری بفرستید یا /cancel.")
             return
-        await state.update_data(wallet_stage="reason", wallet_amount=amount)
+        await state.update_data(
+            wallet_stage="reason",
+            wallet_amount=amount,
+            # One idempotency token per adjustment wizard: the confirm
+            # tap (and its double-tap twin) derives the ledger key from
+            # THIS token, so a repeated tap replays the same key and
+            # the ledger applies the adjustment once. The old code
+            # minted a fresh uuid4 at apply time — every tap was a
+            # "new" transaction and double-taps charged twice.
+            wallet_adjust_token=uuid.uuid4().hex,
+        )
         rows = [[common.btn("⏭ بدون توضیح", "wallet", "adjust")]]
         from aiogram.types import InlineKeyboardMarkup
 

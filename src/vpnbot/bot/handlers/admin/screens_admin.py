@@ -376,6 +376,7 @@ async def screens_router(
 ) -> None:
     admin = common.guard(admin, Permission.CONTENT_MANAGE)
     action = callback_data.action
+    await state.clear()  # section navigation abandons other wizards
     index = callback_data.item_id
     position = callback_data.page
     stage = _stage_at(index)
@@ -760,7 +761,7 @@ async def message_input(
     try:
         if field == "delay":
             value = raw.strip()
-            if not value.isdigit() or int(value) > 10_000:
+            if not value.isdigit() or int(value) > 3_000:
                 raise screen_service.TemplateError("تأخیر باید عددی بین ۰ تا ۱۰۰۰۰ باشد")
             if not 0 <= position < len(messages):
                 raise screen_service.TemplateError("پیام یافت نشد")
