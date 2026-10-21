@@ -217,17 +217,23 @@ async def buy_with_wallet(
         open_order = (
             await session.execute(
                 select(Order)
-                .join(Payment, Payment.order_id == Order.id)
+                .outerjoin(Payment, Payment.order_id == Order.id)
                 .where(
                     Order.user_id == user.id,
                     Order.plan_id == plan.id,
                     Order.status == OrderStatus.PENDING_PAYMENT,
-                    # An order whose receipt is PENDING_REVIEW belongs
-                    # to the admin's queue: reusing it here made the
-                    # wallet confirm fail with "payment under review"
-                    # and blocked buying a second unit with the wallet.
-                    Payment.status.in_(
-                        [PaymentStatus.AWAITING_PAYMENT_DETAILS, PaymentStatus.REJECTED]
+                    # Orders minted by THIS wallet-ask flow have no
+                    # Payment row yet — an inner join here made them
+                    # invisible, so every ask minted another order
+                    # until the customer hit the open-order cap with
+                    # three phantom orders. An order whose receipt is
+                    # PENDING_REVIEW belongs to the admin's queue and
+                    # is still excluded.
+                    (Payment.id.is_(None))
+                    | (
+                        Payment.status.in_(
+                            [PaymentStatus.AWAITING_PAYMENT_DETAILS, PaymentStatus.REJECTED]
+                        )
                     ),
                 )
                 .order_by(Order.id.desc())
@@ -246,6 +252,10 @@ async def buy_with_wallet(
             await alert(callback, "این محصول در دسترس نیست")
             return
         order, _plan = resolved
+        # Bind the order in FSM state too (not only in the confirm
+        # button): /cancel and the menu cancel can then cancel this
+        # exact order instead of leaving it to the TTL sweep.
+        await state.update_data(order_id=order.id, plan_id=plan.id, order_ref=order.public_id)
         await callback.answer()
         message = callback.message
         if isinstance(message, Message):
@@ -289,8 +299,11 @@ async def buy_with_wallet(
     order = await order_service.user_order(
         session, order_id=callback_data.order_id, user_id=user.id
     )
-    if order is None or order.plan_id != plan.id:
-        await alert(callback, "این سفارش یافت نشد؛ دوباره تلاش کنید")
+    if order is None or order.plan_id != plan.id or order.total_irt != plan.price_irt:
+        # The price check matters here (not only in _resolve_order):
+        # this confirm can be tapped on an OLD message after an admin
+        # price change, and the order still carries its snapshot price.
+        await alert(callback, "مشخصات یا قیمت این سفارش تغییر کرده است؛ لطفاً دوباره اقدام کنید")
         return
     if order.payment is not None and order.payment.status is PaymentStatus.APPROVED:
         await alert(callback, "این سفارش قبلاً پرداخت شده است")

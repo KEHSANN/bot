@@ -388,21 +388,30 @@ async def approve_payment(
     * Writes an immutable PaymentReview + audit event.
     * Enqueues exactly one FULFILL_ORDER job (unique idempotency key).
     """
+    # Lock order-then-payment — the same order pay_order_with_wallet
+    # and fulfilment's gate use. This function used to lock the
+    # payment first, so an approval racing a wallet payment could
+    # take the locks in opposite order and deadlock.
+    payment_ref = (
+        await session.execute(select(Payment).where(Payment.id == payment_id))
+    ).scalar_one_or_none()
+    if payment_ref is None:
+        raise PaymentError("پرداخت یافت نشد")
+    order = (
+        await session.execute(
+            select(Order).where(Order.id == payment_ref.order_id).with_for_update()
+        )
+    ).scalar_one()
     payment = (
         await session.execute(
             select(Payment).where(Payment.id == payment_id).with_for_update()
         )
-    ).scalar_one_or_none()
-    if payment is None:
-        raise PaymentError("پرداخت یافت نشد")
+    ).scalar_one()
     if payment.status is PaymentStatus.APPROVED:
         return payment  # idempotent success
     if payment.status is not PaymentStatus.PENDING_REVIEW:
         raise PaymentError("فقط پرداخت‌های در انتظار بررسی قابل تأیید هستند")
 
-    order = (
-        await session.execute(select(Order).where(Order.id == payment.order_id).with_for_update())
-    ).scalar_one()
     await _guard_self_approval(session, admin_id=admin_id, target_user_id=order.user_id)
     if order.status not in (OrderStatus.PENDING_PAYMENT, OrderStatus.PAID):
         raise PaymentError("وضعیت سفارش اجازه تأیید پرداخت را نمی‌دهد")
@@ -450,11 +459,18 @@ async def reject_payment(
 ) -> Payment:
     if not reason.strip():
         raise PaymentError("دلیل رد پرداخت الزامی است")
+    # Same lock order as approve_payment: order row, then payment row.
+    payment_ref = (
+        await session.execute(select(Payment).where(Payment.id == payment_id))
+    ).scalar_one_or_none()
+    if payment_ref is None:
+        raise PaymentError("پرداخت یافت نشد")
+    await session.execute(
+        select(Order).where(Order.id == payment_ref.order_id).with_for_update()
+    )
     payment = (
         await session.execute(select(Payment).where(Payment.id == payment_id).with_for_update())
-    ).scalar_one_or_none()
-    if payment is None:
-        raise PaymentError("پرداخت یافت نشد")
+    ).scalar_one()
     if payment.status is PaymentStatus.REJECTED:
         return payment
     if payment.status not in (PaymentStatus.PENDING_REVIEW, PaymentStatus.AWAITING_PAYMENT_DETAILS):

@@ -61,10 +61,27 @@ async def upsert_user(
             await session.execute(select(User).where(User.telegram_id == telegram_id))
         ).scalar_one()
     else:
-        user.username = username
-        user.first_name = first_name or user.first_name
-        user.last_name = last_name or user.last_name
-        user.last_seen_at = now
+        # Write sparingly: this runs on EVERY update, and an
+        # unconditional last_seen_at bump issues an UPDATE that holds
+        # the users row lock for the whole handler transaction
+        # (including Telegram HTTP calls). Only write when the
+        # profile actually changed or the seen-stamp is stale (>60s).
+        new_first = first_name or user.first_name
+        new_last = last_name or user.last_name
+        stale_seen = (
+            user.last_seen_at is None
+            or (now - user.last_seen_at).total_seconds() >= 60
+        )
+        if (
+            user.username != username
+            or user.first_name != new_first
+            or user.last_name != new_last
+            or stale_seen
+        ):
+            user.username = username
+            user.first_name = new_first
+            user.last_name = new_last
+            user.last_seen_at = now
     return user
 
 

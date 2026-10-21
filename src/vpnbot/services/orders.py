@@ -200,13 +200,13 @@ async def cancel_order(session: AsyncSession, order_id: int, *, reason: str | No
         # here would refund the money, return the (delivered) config
         # to the pool and let it be sold twice.
         raise OrderError("سفارش در حال ارسال است؛ چند لحظه دیگر دوباره تلاش کنید")
-    order.status = OrderStatus.CANCELLED
-    order.notes = reason
 
     # A delivery attempt means a send was tried: the pair may already
-    # be with the customer even if the worker recorded a failure. Such
-    # orders are still cancellable, but the item is never returned to
-    # the pool and the wallet is not auto-refunded (manual review).
+    # be with the customer even if the worker recorded a failure.
+    # Auto-cancelling such an order cannot be made safe in one step —
+    # repooling risks a double sale, refunding risks a free config —
+    # so it is refused and left to manual review (the item stays
+    # RESERVED to this order and is never sold again either way).
     from vpnbot.db.enums import InventoryStatus, LedgerKind, PaymentStatus
     from vpnbot.db.models.inventory import DeliveryAttempt, InventoryAssignment
     from vpnbot.services import inventory as inventory_service
@@ -221,6 +221,14 @@ async def cancel_order(session: AsyncSession, order_id: int, *, reason: str | No
             )
         ).scalar_one()
     )
+    if attempts > 0:
+        raise OrderError(
+            "برای این سفارش تلاش تحویل ثبت شده است؛ لغو خودکار ممکن نیست "
+            "(احتمال تحویل کانفیگ). برای بررسی دستی با پشتیبانی هماهنگ کنید"
+        )
+
+    order.status = OrderStatus.CANCELLED
+    order.notes = reason
 
     # The payment leaves the review queue with the order; before this,
     # a cancelled order's receipt sat in PENDING_REVIEW forever.
@@ -230,6 +238,11 @@ async def cancel_order(session: AsyncSession, order_id: int, *, reason: str | No
         PaymentStatus.PENDING_REVIEW,
     ):
         payment.status = PaymentStatus.CANCELLED
+        # Free the TXID like reject/expire do: the txid column is
+        # unique and txid_taken ignores status, so a cancelled
+        # payment's hash stayed burned forever and the customer could
+        # never resubmit that (real) transfer for a new order.
+        payment.txid = None
 
     if attempts == 0:
         item = await inventory_service.item_for_order(session, order.id)
