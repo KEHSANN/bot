@@ -1436,7 +1436,7 @@ async def test_self_approval_guard_for_non_owner_admins(session) -> None:
 async def test_wallet_admin_decrease_path_and_open_caps(session) -> None:
     from tests.factories import make_catalog, make_user
 
-    from vpnbot.db.enums import LedgerKind, PaymentMethod
+    from vpnbot.db.enums import LedgerKind, PaymentMethod, PaymentStatus
     from vpnbot.services import orders as order_service
     from vpnbot.services import topups as topup_service
     from vpnbot.services import wallet as wallet_service
@@ -1474,9 +1474,30 @@ async def test_wallet_admin_decrease_path_and_open_caps(session) -> None:
         CARD_SETTINGS,
         {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
     )
-    for _ in range(3):
+    # Round 10 (BUG-01a): a fresh top-up supersedes the customer's own
+    # stale AWAITING ones instead of letting them pile up to the cap
+    # and lock the wallet for the whole review TTL.
+    made = [
         await topup_service.create_topup(
             session, user_id=user.id, amount_irt=50_000, method=PaymentMethod.CARD
+        )
+        for _ in range(3)
+    ]
+    for old in made[:2]:
+        await session.refresh(old)
+        assert old.status is PaymentStatus.CANCELLED
+    # The cap still applies to top-ups actually awaiting a decision
+    # (each is submitted before the next is created, so none of them
+    # is a stale AWAITING that a newer request would supersede).
+    await topup_service.submit_card_receipt(
+        session, topup_id=made[2].id, user_id=user.id, file_id="cap-r", file_type="photo"
+    )
+    for _ in range(2):
+        t = await topup_service.create_topup(
+            session, user_id=user.id, amount_irt=50_000, method=PaymentMethod.CARD
+        )
+        await topup_service.submit_card_receipt(
+            session, topup_id=t.id, user_id=user.id, file_id="cap-r", file_type="photo"
         )
     try:
         await topup_service.create_topup(
@@ -1485,7 +1506,7 @@ async def test_wallet_admin_decrease_path_and_open_caps(session) -> None:
     except topup_service.TopUpError:
         pass
     else:
-        raise AssertionError("4th concurrent open top-up must be refused")
+        raise AssertionError("4th concurrent in-review top-up must be refused")
 
 
 async def test_seed_defaults_never_overwrites(session) -> None:
@@ -1767,3 +1788,112 @@ async def test_broadcast_materialize_pairs(session) -> None:
     ).scalar_one()
     assert count == 4  # 3 customers + the owner is a user too
     assert campaign.total_recipients == 4
+
+
+# --- Round 11: tier-2 race, import split, misc handler bugs ----------
+
+
+async def test_tier2_grant_is_once_per_inviter(session) -> None:
+    from tests.factories import make_user
+
+    from vpnbot.services import referrals as referral_service
+    from vpnbot.services import wallet as wallet_service
+
+    inviter = await make_user(session, telegram_id=900000901)
+    ref_a = await make_user(session, telegram_id=900000902)
+    ref_b = await make_user(session, telegram_id=900000903)
+    from tests.factories import make_catalog
+
+    from vpnbot.services import orders as order_service
+
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 2, "tier2once")
+    order_a = await order_service.create_order(
+        session, user_id=ref_a.id, plan_id=plan.id, product=product, plan=plan
+    )
+    order_b = await order_service.create_order(
+        session, user_id=ref_b.id, plan_id=plan.id, product=product, plan=plan
+    )
+
+    first = await referral_service._issue(
+        session, inviter_id=inviter.id, referred_user_id=ref_a.id,
+        order_id=order_a.id, tier=2, amount=10_000,
+    )
+    assert first is not None
+    # A second tier-2 for the same inviter (another invitee's order,
+    # as happens when two fulfilments race) is refused by the partial
+    # unique index, and no second credit lands.
+    second = await referral_service._issue(
+        session, inviter_id=inviter.id, referred_user_id=ref_b.id,
+        order_id=order_b.id, tier=2, amount=10_000,
+    )
+    assert second is None
+    assert await wallet_service.balance(session, inviter.id) == 10_000
+
+
+def test_import_split_line_keeps_single_configs_intact() -> None:
+    from vpnbot.services.import_service import parse_records
+
+    # A comma inside the config (alpn) is not a column separator.
+    recs = parse_records("vless://x@h:443?alpn=h2,http/1.1#n", allow_config_only=True)
+    assert recs[0].error is None
+    assert recs[0].config == "vless://x@h:443?alpn=h2,http/1.1#n"
+
+    # A pipe inside the server name is not a separator either.
+    recs = parse_records("vless://x@h:443#DE | VIP", allow_config_only=True)
+    assert recs[0].error is None
+    assert recs[0].sub_url is None
+
+    # Real pairs still split, on either separator.
+    recs = parse_records("vless://x,https://sub.example/abc")
+    assert recs[0].error is None and recs[0].sub_url == "https://sub.example/abc"
+    recs = parse_records("vless://x|https://sub.example/abc")
+    assert recs[0].error is None and recs[0].sub_url == "https://sub.example/abc"
+
+
+def test_money_error_escapes_raw_input() -> None:
+    from vpnbot.money import MoneyError, parse_amount_irt
+
+    try:
+        parse_amount_irt("5<0")
+    except MoneyError as exc:
+        assert "&lt;" in str(exc)
+    else:
+        raise AssertionError("invalid amount must raise")
+
+
+async def test_find_user_with_duplicate_username(session) -> None:
+    from tests.factories import make_user
+
+    from vpnbot.bot.handlers.admin.wallet_admin import _find_user
+
+    first = await make_user(session, telegram_id=900000911)
+    second = await make_user(session, telegram_id=900000912)
+    first.username = "sharedhandle"
+    second.username = "sharedhandle"
+    await session.flush()
+    found = await _find_user(session, "@SharedHandle")
+    assert found is not None and found.id == first.id  # no MultipleResultsFound
+
+
+async def test_storage_is_alive_checks() -> None:
+    from aiogram.fsm.storage.memory import MemoryStorage
+
+    from vpnbot.bot.app import storage_is_alive
+
+    assert await storage_is_alive(None) is True
+    assert await storage_is_alive(MemoryStorage()) is True
+
+    class _DeadRedis:
+        async def ping(self):
+            raise ConnectionError("down")
+
+    from types import SimpleNamespace
+
+    assert await storage_is_alive(SimpleNamespace(redis=_DeadRedis())) is False
+
+
+def test_payment_ttl_default_is_six_hours() -> None:
+    from vpnbot.config import Settings
+
+    assert Settings.model_fields["payment_review_ttl_hours"].default == 6
