@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import secrets
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -18,6 +18,10 @@ class OrderError(ValueError):
     pass
 
 
+#: Maximum simultaneous unpaid orders per customer (see create_order).
+MAX_OPEN_ORDERS = 3
+
+
 def _public_id() -> str:
     return secrets.token_hex(4).upper()
 
@@ -29,6 +33,22 @@ async def create_order(
         raise OrderError("این محصول یا پلن در حال حاضر قابل خرید نیست")
     if plan.price_irt <= 0:
         raise OrderError("قیمت پلن نامعتبر است")
+    # Anti-spam cap: unlimited open orders let one account flood the
+    # admin payment queue with fake receipts. Three concurrent unpaid
+    # orders is generous for a real customer.
+    open_orders = int(
+        (
+            await session.execute(
+                select(func.count(Order.id)).where(
+                    Order.user_id == user_id, Order.status == OrderStatus.PENDING_PAYMENT
+                )
+            )
+        ).scalar_one()
+    )
+    if open_orders >= MAX_OPEN_ORDERS:
+        raise OrderError(
+            "سفارش پرداخت‌نشده‌ی باز دارید؛ ابتدا آن‌ها را تکمیل یا لغو کنید"
+        )
     if await catalog_service.stock_for_plan(session, product.id, plan.id) <= 0:
         raise OrderError("موجودی این محصول به پایان رسیده است")
 
@@ -113,48 +133,72 @@ async def cancel_order(session: AsyncSession, order_id: int, *, reason: str | No
         raise OrderError("سفارش یافت نشد")
     if order.status in (OrderStatus.FULFILLED, OrderStatus.REFUNDED):
         raise OrderError("سفارش تحویل‌شده قابل لغو نیست")
+    if order.delivery_status is DeliveryStatus.SENDING:
+        # The worker is between "reserved" and "finalised" right now:
+        # the config may already be in the customer's chat. Cancelling
+        # here would refund the money, return the (delivered) config
+        # to the pool and let it be sold twice.
+        raise OrderError("سفارش در حال ارسال است؛ چند لحظه دیگر دوباره تلاش کنید")
     order.status = OrderStatus.CANCELLED
     order.notes = reason
 
-    # Release a reserved-but-undelivered inventory item back to the
-    # pool; before this, cancelling a paid order leaked the unit as
-    # RESERVED forever. The assignment row documents the binding, so it
-    # goes with it. (DELIVERED items never reach here — fulfilled orders
-    # are refused above.)
+    # A delivery attempt means a send was tried: the pair may already
+    # be with the customer even if the worker recorded a failure. Such
+    # orders are still cancellable, but the item is never returned to
+    # the pool and the wallet is not auto-refunded (manual review).
     from vpnbot.db.enums import InventoryStatus, LedgerKind, PaymentStatus
-    from vpnbot.db.models.inventory import InventoryAssignment
+    from vpnbot.db.models.inventory import DeliveryAttempt, InventoryAssignment
     from vpnbot.services import inventory as inventory_service
     from vpnbot.services import wallet as wallet_service
 
-    item = await inventory_service.item_for_order(session, order.id)
-    if item is not None and item.status is InventoryStatus.RESERVED:
-        item.status = InventoryStatus.AVAILABLE
-        item.assigned_order_id = None
-        item.reserved_at = None
-        assignment = (
+    attempts = int(
+        (
             await session.execute(
-                select(InventoryAssignment).where(InventoryAssignment.order_id == order.id)
+                select(func.count(DeliveryAttempt.id)).where(
+                    DeliveryAttempt.order_id == order.id
+                )
             )
-        ).scalar_one_or_none()
-        if assignment is not None:
-            await session.delete(assignment)
+        ).scalar_one()
+    )
 
-    # Wallet-paid orders refund themselves back to the wallet, exactly
-    # once (ledger idempotency key). Card/crypto payments were settled
-    # outside the bot — refunding those stays a manual admin action.
+    # The payment leaves the review queue with the order; before this,
+    # a cancelled order's receipt sat in PENDING_REVIEW forever.
     payment = order.payment
-    if (
-        payment is not None
-        and payment.method is PaymentMethod.WALLET
-        and payment.status is PaymentStatus.APPROVED
+    if payment is not None and payment.status in (
+        PaymentStatus.AWAITING_PAYMENT_DETAILS,
+        PaymentStatus.PENDING_REVIEW,
     ):
-        await wallet_service.credit(
-            session,
-            user_id=order.user_id,
-            amount_irt=order.total_irt,
-            kind=LedgerKind.REFUND,
-            key=f"order:{order.id}:refund",
-            reason=f"استرداد لغو سفارش #{order.public_id}",
-        )
+        payment.status = PaymentStatus.CANCELLED
+
+    if attempts == 0:
+        item = await inventory_service.item_for_order(session, order.id)
+        if item is not None and item.status is InventoryStatus.RESERVED:
+            item.status = InventoryStatus.AVAILABLE
+            item.assigned_order_id = None
+            item.reserved_at = None
+            assignment = (
+                await session.execute(
+                    select(InventoryAssignment).where(InventoryAssignment.order_id == order.id)
+                )
+            ).scalar_one_or_none()
+            if assignment is not None:
+                await session.delete(assignment)
+
+        # Wallet-paid orders refund themselves back to the wallet,
+        # exactly once (ledger idempotency key). Card/crypto payments
+        # were settled outside the bot — refunding those stays manual.
+        if (
+            payment is not None
+            and payment.method is PaymentMethod.WALLET
+            and payment.status is PaymentStatus.APPROVED
+        ):
+            await wallet_service.credit(
+                session,
+                user_id=order.user_id,
+                amount_irt=order.total_irt,
+                kind=LedgerKind.REFUND,
+                key=f"order:{order.id}:refund",
+                reason=f"استرداد لغو سفارش #{order.public_id}",
+            )
     await session.flush()
     return order

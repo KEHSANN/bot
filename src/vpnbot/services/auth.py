@@ -71,6 +71,22 @@ async def bind_referral(session: AsyncSession, user: User, code: str) -> bool:
         # before either has bought — each would earn a reward from the
         # other's first purchase. A two-cycle is not a referral.
         return False
+    # Longer cycles (A -> B -> C -> A) need a chain walk: follow the
+    # inviter's own referrer chain upwards; if this user appears in it,
+    # binding would close a loop.
+    seen: set[int] = set()
+    cursor = inviter
+    for _ in range(10):
+        nxt = cursor.referred_by_id
+        if nxt is None or nxt in seen:
+            break
+        if nxt == user.id:
+            return False
+        seen.add(nxt)
+        parent = await session.get(User, nxt)
+        if parent is None:
+            break
+        cursor = parent
     from vpnbot.db.models.orders import Order
 
     has_orders = (

@@ -53,11 +53,26 @@ class OrderRevealCB(CallbackData, prefix="or"):
     order_id: int
 
 
+class OrderPayCB(CallbackData, prefix="opay"):
+    """Re-enter checkout for an existing unpaid order (e.g. after the
+    payment was rejected) so the receipt can be submitted again."""
+
+    order_id: int
+
+
 class WalletBuyCB(CallbackData, prefix="wb"):
-    """Buy this plan with the wallet balance. ``confirm`` 0 asks first."""
+    """Buy this plan with the wallet balance. ``confirm`` 0 asks first.
+
+    The confirmation carries the concrete ``order_id`` created at the
+    ask step, so the charge step pays *that* order — a double-tap on
+    «تأیید و پرداخت» hits the same order whose payment is already
+    APPROVED and is refused, instead of creating and charging a second
+    order (the round-8 double-charge bug).
+    """
 
     plan_id: int
     confirm: int = 0
+    order_id: int = 0
 
 
 class OrdersPageCB(CallbackData, prefix="op"):

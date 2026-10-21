@@ -17,9 +17,9 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vpnbot.bot.handlers.customer.common import alert, base_context, money, sender_for
-from vpnbot.bot.keyboards.callbacks import MenuCB, ProductCB, WalletBuyCB
+from vpnbot.bot.keyboards.callbacks import MenuCB, OrderPayCB, ProductCB, WalletBuyCB
 from vpnbot.bot.states import CheckoutStates
-from vpnbot.db.enums import OrderStatus, PaymentMethod
+from vpnbot.db.enums import OrderStatus, PaymentMethod, PaymentStatus
 from vpnbot.db.models.catalog import Plan
 from vpnbot.db.models.orders import Order
 from vpnbot.db.models.users import User
@@ -29,6 +29,7 @@ from vpnbot.services import orders as order_service
 from vpnbot.services import payments as payment_service
 from vpnbot.services import wallet as wallet_service
 from vpnbot.services.screens import (
+    STAGE_CHECKOUT,
     STAGE_MAIN_MENU,
     STAGE_PAYMENT_CARD,
     STAGE_PAYMENT_CRYPTO,
@@ -196,6 +197,38 @@ async def buy_with_wallet(
                 "از بخش کیف پول می‌توانید موجودی را افزایش دهید.",
             )
             return
+        # Create (or reuse) the pending order NOW and bind the confirm
+        # button to it. Previously the order was only created at charge
+        # time, so every confirm tap minted a fresh order and charged
+        # it — a double-tap meant paying twice.
+        from sqlalchemy import select
+
+        from vpnbot.db.models.orders import Order
+
+        open_order = (
+            await session.execute(
+                select(Order)
+                .where(
+                    Order.user_id == user.id,
+                    Order.plan_id == plan.id,
+                    Order.status == OrderStatus.PENDING_PAYMENT,
+                )
+                .order_by(Order.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        try:
+            resolved = await _resolve_order(
+                session, user=user, plan_id=plan.id,
+                existing_id=open_order.id if open_order else None,
+            )
+        except payment_service.PaymentError as exc:
+            await alert(callback, f"⚠️ {exc}")
+            return
+        if resolved is None:
+            await alert(callback, "این محصول در دسترس نیست")
+            return
+        order, _plan = resolved
         await callback.answer()
         message = callback.message
         if isinstance(message, Message):
@@ -212,7 +245,9 @@ async def buy_with_wallet(
                         [
                             InlineKeyboardButton(
                                 text="✅ تأیید و پرداخت",
-                                callback_data=WalletBuyCB(plan_id=plan.id, confirm=1).pack(),
+                                callback_data=WalletBuyCB(
+                                    plan_id=plan.id, confirm=1, order_id=order.id
+                                ).pack(),
                                 style="success",
                             )
                         ],
@@ -227,23 +262,29 @@ async def buy_with_wallet(
             )
         return
 
-    # Confirmed: resolve (or create) the pending order and charge it.
-    data = await state.get_data()
+    # Confirmed: charge exactly the order bound at the ask step.
+    import contextlib
+
+    message = callback.message
+    if isinstance(message, Message):
+        with contextlib.suppress(Exception):
+            await message.edit_reply_markup(reply_markup=None)  # disarm the button
+    order = await order_service.user_order(
+        session, order_id=callback_data.order_id, user_id=user.id
+    )
+    if order is None or order.plan_id != plan.id:
+        await alert(callback, "این سفارش یافت نشد؛ دوباره تلاش کنید")
+        return
+    if order.payment is not None and order.payment.status is PaymentStatus.APPROVED:
+        await alert(callback, "این سفارش قبلاً پرداخت شده است")
+        return
     try:
-        resolved = await _resolve_order(
-            session, user=user, plan_id=plan.id, existing_id=data.get("order_id")
-        )
-        if resolved is None:
-            await alert(callback, "این محصول در دسترس نیست")
-            return
-        order, _plan = resolved
         await payment_service.pay_order_with_wallet(session, order=order, user_id=user.id)
     except payment_service.PaymentError as exc:
         await alert(callback, f"⚠️ {exc}")
         return
     await state.clear()
     await callback.answer("✅ پرداخت با کیف پول انجام شد")
-    message = callback.message
     if isinstance(message, Message):
         new_balance = await wallet_service.balance(session, user.id)
         await message.answer(
@@ -253,6 +294,43 @@ async def buy_with_wallet(
             f"موجودی باقی‌مانده: {format_irt_plain(new_balance)} تومان\n\n"
             "کانفیگ شما تا لحظاتی دیگر در همین گفتگو ارسال می‌شود."
         )
+
+
+@router.callback_query(OrderPayCB.filter())
+async def resume_checkout(
+    callback: CallbackQuery,
+    callback_data: OrderPayCB,
+    session: AsyncSession,
+    user: User | None,
+    state: FSMContext,
+) -> None:
+    """Re-enter checkout bound to an existing unpaid order.
+
+    Used from the order detail screen after a rejection: the FSM is
+    pointed at *this* order, so choosing a payment method reuses it
+    (start_payment resets a REJECTED payment) instead of minting a new
+    order and orphaning the rejected one.
+    """
+    if user is None or user.is_blocked:
+        await alert(callback, "حساب شما فعال نیست")
+        return
+    order = await order_service.user_order(session, order_id=callback_data.order_id, user_id=user.id)
+    if order is None or order.status is not OrderStatus.PENDING_PAYMENT:
+        await alert(callback, "این سفارش قابل پرداخت نیست")
+        return
+    await state.clear()
+    await state.update_data(order_id=order.id, plan_id=order.plan_id, order_ref=order.public_id)
+    await callback.answer()
+    await sender_for(callback.bot, session).show(
+        callback,
+        STAGE_CHECKOUT,
+        base_context(
+            user,
+            product_title=order.product_title_snapshot,
+            plan_title=order.plan_title_snapshot or order.product_title_snapshot,
+            price=money(order.total_irt),
+        ),
+    )
 
 
 @router.callback_query(MenuCB.filter(F.action == "paycrypto"))

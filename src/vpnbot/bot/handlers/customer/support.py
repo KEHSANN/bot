@@ -11,12 +11,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vpnbot.bot.handlers.customer.common import base_context, sender_for
+from vpnbot.bot.handlers.customer.common import alert, base_context, sender_for
 from vpnbot.bot.keyboards.callbacks import MenuCB
 from vpnbot.bot.states import SupportStates
 from vpnbot.db.models.users import User
 from vpnbot.services import support as support_service
 from vpnbot.services.screens import STAGE_MAIN_MENU, STAGE_SUPPORT
+from vpnbot.services.settings import SUPPORT_SETTINGS, SettingsService
 
 router = Router(name="customer.support")
 
@@ -37,6 +38,10 @@ async def begin_ticket(
 ) -> None:
     if user is None:
         await callback.answer()
+        return
+    config = await SettingsService(session).get(SUPPORT_SETTINGS)
+    if not config.get("enabled", True):
+        await alert(callback, "پشتیبانی در حال حاضر غیرفعال است")
         return
     await state.set_state(SupportStates.awaiting_message)
     await callback.answer()

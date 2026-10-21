@@ -10,7 +10,7 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vpnbot.bot.handlers.customer.common import base_context, money, sender_for
+from vpnbot.bot.handlers.customer.common import alert, base_context, money, sender_for
 from vpnbot.bot.keyboards.callbacks import MenuCB
 from vpnbot.config import get_settings
 from vpnbot.db.models.users import User
@@ -41,6 +41,14 @@ async def open_referral(
 ) -> None:
     if user is None:
         await callback.answer()
+        return
+    from vpnbot.services.settings import REFERRAL_SETTINGS, SHOP_SETTINGS, SettingsService
+
+    settings = SettingsService(session)
+    referral_cfg = await settings.get(REFERRAL_SETTINGS)
+    shop_cfg = await settings.get(SHOP_SETTINGS)
+    if not referral_cfg.get("enabled", True) or not shop_cfg.get("referral_enabled", True):
+        await alert(callback, "دعوت از دوستان در حال حاضر غیرفعال است")
         return
     stats = await referral_service.referral_stats(session, user.id)
     link = await invite_link(callback.bot, user.referral_code)

@@ -138,6 +138,21 @@ async def order_detail(
         return
 
     extra_rows = []
+    if order.status is OrderStatus.PENDING_PAYMENT:
+        # Unpaid or rejected-payment orders get a direct way back into
+        # checkout for THIS order — before this, the customer had to
+        # re-buy from the shop and the rejected order just sat there.
+        from vpnbot.bot.keyboards.callbacks import OrderPayCB
+
+        extra_rows.append(
+            [
+                InlineKeyboardButton(
+                    text="💳 ادامه پرداخت / ارسال فیش",
+                    callback_data=OrderPayCB(order_id=order.id).pack(),
+                    style="primary",
+                )
+            ]
+        )
     if order.status is OrderStatus.FULFILLED:
         extra_rows.append(
             [

@@ -184,7 +184,9 @@ class ScreenSender:
         messages = screen.messages[1:] if skip_first else screen.messages
         try:
             for index, msg in enumerate(messages):
-                delay = int(msg.get("delay_ms", 0) or 0) / 1000
+                # Cap at send time too: screens stored before the 3s
+                # validation cap may still carry a 10s delay.
+                delay = min(int(msg.get("delay_ms", 0) or 0), 3000) / 1000
                 if delay > 0:
                     await asyncio.sleep(delay)
                 last = index == len(messages) - 1
@@ -212,7 +214,12 @@ class ScreenSender:
                             )
                         break
                     except TelegramRetryAfter as exc:
-                        if attempt == 2:
+                        # Never sleep a long rate-limit out inside the
+                        # request: the caller's DB session (and a pooled
+                        # connection) is held for the whole send. A short
+                        # wait is retried; a long one abandons this send
+                        # instead of stalling the pool.
+                        if attempt == 2 or exc.retry_after > 5:
                             log.warning(
                                 "rate limited sending screen %s to %s; giving up this send",
                                 screen.stage,

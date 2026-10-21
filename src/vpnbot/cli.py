@@ -104,9 +104,8 @@ async def cmd_seed(_: argparse.Namespace) -> int:
             await screens.get_or_create(stage)
         print(f"screens: {len(ALL_STAGES)}")
         settings_service = SettingsService(session)
-        for key in DEFAULTS:
-            await settings_service.set(key, {})
-        print(f"settings: {len(DEFAULTS)}")
+        inserted = await settings_service.seed_defaults()
+        print(f"settings: {len(DEFAULTS)} groups ({inserted} newly inserted)")
     return 0
 
 
