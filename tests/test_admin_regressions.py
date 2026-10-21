@@ -1334,8 +1334,10 @@ async def test_cancel_order_race_and_attempt_guards(session) -> None:
     else:
         raise AssertionError("cancel during SENDING must be refused")
 
-    # 2) After a recorded delivery attempt, cancel proceeds but the
-    # item is NOT returned to the pool and the wallet is NOT refunded.
+    # 2) After a recorded delivery attempt, cancel is REFUSED outright
+    # (round 14 policy): the pair may already be with the customer, so
+    # neither repooling nor auto-refunding is safe — manual review.
+    # The order stays alive and the item stays RESERVED to it.
     order.delivery_status = DeliveryStatus.PENDING
     await inventory_reserve(session, item, order)
     from vpnbot.services import inventory as inventory_service
@@ -1345,8 +1347,13 @@ async def test_cancel_order_race_and_attempt_guards(session) -> None:
         outcome="FAILED", error_code="network lost after send",
     )
     await session.flush()
-    await order_service.cancel_order(session, order.id, reason="x")
-    assert order.status is OrderStatus.CANCELLED
+    try:
+        await order_service.cancel_order(session, order.id, reason="x")
+    except order_service.OrderError:
+        pass
+    else:
+        raise AssertionError("cancel after a delivery attempt must be refused")
+    assert order.status is not OrderStatus.CANCELLED
     await session.refresh(item)
     assert item.status is InventoryStatus.RESERVED  # never resold
     assert await wallet_service.balance(session, user.id) == balance_after_pay
@@ -2085,3 +2092,57 @@ async def test_requeue_pending_after_restock(session) -> None:
     assert burned.attempt == 0
     assert burned.last_error is None
     _ = select
+
+
+# --- Round 14: wallet-ask phantom orders, TXID burn, lock order -------
+
+
+async def test_cancel_order_frees_txid(session) -> None:
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import PaymentMethod, PaymentStatus
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services.settings import CRYPTO_SETTINGS, SettingsService
+
+    user = await make_user(session, telegram_id=900001201)
+    await SettingsService(session).set(
+        CRYPTO_SETTINGS,
+        {"enabled": True, "asset": "USDT", "network": "TRC20", "address": "TTestAddress"},
+    )
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 1, "txidfree")
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    payment = await payment_service.start_payment(
+        session, order=order, method=PaymentMethod.CRYPTO
+    )
+    txid = "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12"
+    await payment_service.submit_crypto_evidence(
+        session, payment_id=payment.id, user_id=user.id, txid=txid
+    )
+    assert await payment_service.txid_taken(session, payment_service.normalize_txid(txid))
+
+    await order_service.cancel_order(session, order.id, reason="تست")
+    await session.refresh(payment)
+    assert payment.status is PaymentStatus.CANCELLED
+    assert payment.txid is None  # freed, not burned
+    assert not await payment_service.txid_taken(session, payment_service.normalize_txid(txid))
+
+
+async def test_upsert_user_seen_write_throttle(session) -> None:
+    from datetime import timedelta
+
+    from vpnbot.db.base import utcnow
+    from vpnbot.services import auth as auth_service
+
+    user = await auth_service.upsert_user(session, telegram_id=900001211, first_name="الف")
+    first_seen = user.last_seen_at
+    again = await auth_service.upsert_user(session, telegram_id=900001211, first_name="الف")
+    assert again.last_seen_at == first_seen  # fresh stamp: no write
+
+    user.last_seen_at = utcnow() - timedelta(minutes=2)
+    await session.flush()
+    refreshed = await auth_service.upsert_user(session, telegram_id=900001211, first_name="الف")
+    assert refreshed.last_seen_at > utcnow() - timedelta(seconds=30)  # stale: written
