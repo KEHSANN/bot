@@ -8,6 +8,7 @@ TXID never approve themselves.
 
 from __future__ import annotations
 
+import html
 import re
 from datetime import timedelta
 
@@ -111,7 +112,6 @@ async def submit_card_receipt(
     await notify.enqueue_admins(
         session,
         text=f"🧾 رسید پرداخت جدید برای سفارش #{payment.order_id} — در انتظار بررسی.",
-        idempotency_key=f"notify:payment:{payment.id}:receipt",
     )
     await session.flush()
     return payment
@@ -154,7 +154,6 @@ async def submit_crypto_evidence(
     await notify.enqueue_admins(
         session,
         text=f"🧾 هش تراکنش جدید برای سفارش #{payment.order_id} — در انتظار بررسی.",
-        idempotency_key=f"notify:payment:{payment.id}:receipt",
     )
     try:
         async with session.begin_nested():
@@ -436,10 +435,9 @@ async def reject_payment(
             user_id=order.user_id,
             text=(
                 f"❌ پرداخت سفارش #{order.public_id} رد شد.\n"
-                f"دلیل: {reason[:500]}\n"
+                f"دلیل: {html.escape(reason[:500])}\n"
                 "می‌توانید از بخش سفارش‌ها، رسید یا هش صحیح را دوباره ارسال کنید."
             ),
-            idempotency_key=f"notify:payment:{payment.id}:rejected",
         )
     await session.flush()
     return payment

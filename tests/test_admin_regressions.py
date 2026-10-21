@@ -1048,3 +1048,125 @@ async def test_cancel_command_handler_only_clears_state() -> None:
     assert await ctx.get_data() == {}
     assert answers == ["عملیات لغو شد."]
 
+
+def test_commands_router_actually_registers_handlers() -> None:
+    """Regression for the round-7 bug: ``router.message(handler, ...)``
+    is a decorator factory in aiogram 3 — calling it registered ZERO
+    handlers while every direct-call test stayed green. Pin the count
+    at the router level, not the function level."""
+    from vpnbot.bot.handlers import commands
+
+    router = commands.build_commands_router()
+    handlers = router.message.handlers
+    assert len(handlers) == 4
+    callbacks = {h.callback for h in handlers}
+    assert callbacks == {commands._cancel, commands._start, commands._menu, commands._panel}
+
+
+async def test_support_followup_reopens_answered_ticket(session) -> None:
+    from tests.factories import make_user
+
+    from vpnbot.db.enums import TicketSender, TicketStatus
+    from vpnbot.services import support as support_service
+    from vpnbot.services.auth import bootstrap_owner
+
+    await bootstrap_owner(session, telegram_id=900000601)
+    user = await make_user(session, telegram_id=900000602)
+    ticket = await support_service.create_ticket(session, user=user, text="مشکل دارم")
+    await support_service.add_message(
+        session, ticket=ticket, text="بررسی شد",
+        sender_type=TicketSender.ADMIN, sender_id=1,
+    )
+    assert ticket.status is TicketStatus.ANSWERED
+
+    again = await support_service.create_ticket(session, user=user, text="هنوز مشکل دارم")
+    assert again.id == ticket.id
+    assert ticket.status is TicketStatus.OPEN  # visible in the default admin list again
+
+    from sqlalchemy import select
+
+    from vpnbot.db.models.system import Job
+
+    texts = [
+        str(j.payload.get("text", ""))
+        for j in (await session.execute(select(Job))).scalars()
+        if isinstance(j.payload, dict)
+    ]
+    assert any("تیکت پشتیبانی جدید" in t for t in texts)
+    assert any("پیام جدید در تیکت" in t for t in texts)  # follow-up notified too
+
+
+async def test_resubmission_notifies_admins_again(session) -> None:
+    from sqlalchemy import select
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import PaymentMethod
+    from vpnbot.db.models.system import Job
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services.auth import bootstrap_owner
+    from vpnbot.services.settings import CARD_SETTINGS, SettingsService
+
+    admin = await bootstrap_owner(session, telegram_id=900000611)
+    await SettingsService(session).set(
+        CARD_SETTINGS,
+        {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
+    )
+    user = await make_user(session, telegram_id=900000612)
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 1, "resub")
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    payment = await payment_service.start_payment(session, order=order, method=PaymentMethod.CARD)
+
+    async def _notify_texts() -> list[str]:
+        return [
+            str(j.payload.get("text", ""))
+            for j in (await session.execute(select(Job))).scalars()
+            if isinstance(j.payload, dict)
+        ]
+
+    await payment_service.submit_card_receipt(
+        session, payment_id=payment.id, user_id=user.id, file_id="r1", file_type="photo"
+    )
+    assert sum("رسید پرداخت جدید" in t for t in await _notify_texts()) == 1
+
+    await payment_service.reject_payment(
+        session, payment_id=payment.id, admin_id=admin.id, reason="ناخوانا <b>بود</b>"
+    )
+    rejected = [t for t in await _notify_texts() if "رد شد" in t]
+    assert rejected and "&lt;b&gt;" in rejected[0]  # reason escaped for HTML send
+
+    # Resubmission on the SAME payment id must notify admins again —
+    # a fixed idempotency key silently swallowed this in round 7.
+    await payment_service.submit_card_receipt(
+        session, payment_id=payment.id, user_id=user.id, file_id="r2", file_type="photo"
+    )
+    assert sum("رسید پرداخت جدید" in t for t in await _notify_texts()) == 2
+
+
+def test_optional_int_bounds() -> None:
+    from vpnbot.bot.handlers.admin.catalog import _optional_int
+
+    assert _optional_int("30") == 30
+    assert _optional_int("۱,۰۰۰") == 1000
+    assert _optional_int("0") is None
+    assert _optional_int("-5") is None  # used to pass through (truthy)
+    assert _optional_int("99999999999") is None  # used to crash int32 columns
+    assert _optional_int("abc") is None
+
+
+def test_html_validator_rejects_stray_angle_brackets() -> None:
+    from vpnbot.services import screens as screen_service
+
+    screen_service._validate_html("حجم: ۵۰ گیگ", "تست")
+    screen_service._validate_html("a &lt; b", "تست")
+    for text in ("حجم < 50 گیگ", "قیمت > ۱۰۰"):
+        try:
+            screen_service._validate_html(text, "تست")
+        except screen_service.TemplateError:
+            pass
+        else:
+            raise AssertionError(f"stray bracket must be rejected: {text}")
+

@@ -8,6 +8,8 @@ The minimum amount and the on/off switch are admin settings
 
 from __future__ import annotations
 
+import html
+
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -103,7 +105,6 @@ async def submit_card_receipt(
     await notify.enqueue_admins(
         session,
         text=f"🧾 رسید شارژ کیف پول جدید (#{topup.id}) — در انتظار بررسی.",
-        idempotency_key=f"notify:topup:{topup.id}:receipt",
     )
     await session.flush()
     return topup
@@ -140,7 +141,6 @@ async def submit_crypto_evidence(
     await notify.enqueue_admins(
         session,
         text=f"🧾 هش تراکنش شارژ کیف پول جدید (#{topup.id}) — در انتظار بررسی.",
-        idempotency_key=f"notify:topup:{topup.id}:receipt",
     )
     try:
         async with session.begin_nested():
@@ -226,10 +226,9 @@ async def reject_topup(
         user_id=topup.user_id,
         text=(
             "❌ درخواست شارژ کیف پول شما رد شد.\n"
-            f"دلیل: {reason[:500]}\n"
+            f"دلیل: {html.escape(reason[:500])}\n"
             "می‌توانید از بخش کیف پول، شارژ جدیدی با رسید صحیح ثبت کنید."
         ),
-        idempotency_key=f"notify:topup:{topup.id}:rejected",
     )
     await session.flush()
     return topup
