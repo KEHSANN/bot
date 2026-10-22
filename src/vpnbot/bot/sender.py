@@ -109,6 +109,7 @@ class ScreenSender:
         log_outcome: bool = True,
     ) -> None:
         snapshot, rendered = await self.render(stage, context)
+        await self._commit_before_send()
         if isinstance(target, CallbackQuery):
             ok = await self._edit_or_send(target, rendered, extra_rows)
             if log_outcome:
@@ -117,6 +118,30 @@ class ScreenSender:
             ok = await self._send_messages(target.chat.id, rendered, extra_rows=extra_rows)
             if log_outcome:
                 await self._log(snapshot, target.chat.id, ok)
+
+    async def _commit_before_send(self) -> None:
+        """End the caller's DB transaction BEFORE any Telegram call.
+
+        Handlers run inside DbSessionMiddleware's per-update
+        transaction. A screen send can take seconds (per-message
+        delays, media uploads, rate-limit backoff) — holding the
+        transaction open across it kept a pooled connection AND any
+        FOR UPDATE row locks for the whole network phase, so a burst
+        of slow sends could drain the pool (20 connections) and stall
+        unrelated updates behind locks that were only waiting on
+        Telegram.
+
+        The render above is the last DB read a show() needs, so the
+        transaction commits here: the connection returns to the pool
+        and locks release before the first send. Handler work after
+        show() runs in a fresh transaction, which the middleware
+        commits at the end as before. Sessions are created with
+        expire_on_commit=False, so objects loaded before the commit
+        stay usable afterwards.
+        """
+        session = getattr(self.screens, "session", None)
+        if session is not None and session.in_transaction():
+            await session.commit()
 
     async def _edit_or_send(
         self,

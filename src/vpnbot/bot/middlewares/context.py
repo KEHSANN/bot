@@ -48,6 +48,24 @@ def _event_chat(event: TelegramObject) -> Any:
 
 
 class DbSessionMiddleware(BaseMiddleware):
+    """One session per update, committed in phases.
+
+    The middleware opens the session and commits whatever is still
+    open when the handler returns (rolling back on exceptions). The
+    long pole used to be the network phase: handlers send screens
+    (Telegram calls + configured delays) while this transaction —
+    its pooled connection and any FOR UPDATE locks — stayed open.
+
+    Screen sends now end the transaction themselves:
+    ``ScreenSender.show`` commits right after rendering, before the
+    first Telegram call (see ``ScreenSender._commit_before_send``).
+    So an update's DB work runs in short transactions — everything
+    up to its first screen send, then any follow-up work — and no
+    connection or row lock is ever held across a network send or a
+    display delay. Sessions use expire_on_commit=False, so handler
+    objects stay readable across the phase boundary.
+    """
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self.session_factory = session_factory
 
