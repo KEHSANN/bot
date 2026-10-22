@@ -84,7 +84,16 @@ async def apply(
     account = await get_or_create_account(session, user_id)
     locked = (
         await session.execute(
-            select(WalletAccount).where(WalletAccount.id == account.id).with_for_update()
+            select(WalletAccount)
+            .where(WalletAccount.id == account.id)
+            .with_for_update()
+            # populate_existing is load-bearing: get_or_create_account
+            # already cached this row in the identity map, and without
+            # it the FOR UPDATE query waits for the row lock but
+            # returns the STALE cached balance — three concurrent
+            # wallet payments could each pass the balance check
+            # against the same funds (double-spend).
+            .execution_options(populate_existing=True)
         )
     ).scalar_one()
 

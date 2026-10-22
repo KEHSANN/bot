@@ -59,6 +59,17 @@ def _review_ttl() -> timedelta:
 async def start_payment(
     session: AsyncSession, *, order: Order, method: PaymentMethod
 ) -> Payment:
+    # Lock the ORDER row first and decide on the fresh state: the
+    # caller's ``order`` object may be a cached copy, and without the
+    # lock a concurrent wallet payment could be overwritten back to
+    # AWAITING by the reset below (wallet debited, gate then refuses
+    # delivery, cancel refunds nothing).
+    from vpnbot.services import orders as order_service
+
+    locked = await order_service.get_order(session, order.id, for_update=True)
+    if locked is None:
+        raise PaymentError("سفارش یافت نشد")
+    order = locked
     if order.status is not OrderStatus.PENDING_PAYMENT:
         # A stale checkout state must not revive a closed order.
         raise PaymentError("این سفارش دیگر قابل پرداخت نیست")
@@ -76,7 +87,12 @@ async def start_payment(
     # the relationship loaded, and a lazy load inside async code raises
     # MissingGreenlet. Query the row explicitly instead.
     payment = (
-        await session.execute(select(Payment).where(Payment.order_id == order.id))
+        await session.execute(
+            select(Payment)
+            .where(Payment.order_id == order.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     ).scalar_one_or_none()
     if payment is None:
         payment = Payment(order_id=order.id, amount_irt=order.total_irt, method=method)
@@ -185,15 +201,24 @@ def normalize_txid(raw: str) -> str:
     stored value is canonical, so the unique index itself enforces
     case-insensitive uniqueness.
     """
-    return (raw or "").strip().lower()
+    cleaned = (raw or "").strip().lower()
+    # Canonicalize equivalent spellings of the same transfer: an EVM
+    # hash submitted as 0x<hex> and later as <hex> (or with cosmetic
+    # - / _ separators) is ONE transaction — as different strings
+    # they slipped past both lock_txid and the uniqueness probe and
+    # the same transfer funded two purchases.
+    if cleaned.startswith("0x"):
+        cleaned = cleaned[2:]
+    return cleaned.replace("-", "").replace("_", "")
 
 
-_TXID_RE = re.compile(r"^[0-9a-z_-]{8,200}$")
+_TXID_RE = re.compile(r"^[0-9a-z]{8,200}$")
 
 
 def valid_txid(normalized: str) -> bool:
-    """A normalized TXID is 8-200 chars of [0-9a-z_-] — no control
-    characters, no whitespace, no free-form text."""
+    """A normalized TXID is 8-200 chars of [0-9a-z] (canonical form
+    has no separators left) — no control characters, no whitespace,
+    no free-form text."""
     return bool(_TXID_RE.fullmatch(normalized or ""))
 
 
@@ -259,9 +284,13 @@ async def _payment_for_user(session: AsyncSession, payment_id: int, user_id: int
     ).scalar_one_or_none()
     if order_id is None:
         raise PaymentError("پرداخت یافت نشد")
-    await session.execute(select(Order).where(Order.id == order_id).with_for_update())
+    await session.execute(
+            select(Order).where(Order.id == order_id).with_for_update().execution_options(populate_existing=True)
+        )
     payment = (
-        await session.execute(select(Payment).where(Payment.id == payment_id).with_for_update())
+        await session.execute(
+            select(Payment).where(Payment.id == payment_id).with_for_update().execution_options(populate_existing=True)
+        )
     ).scalar_one_or_none()
     if payment is None:
         raise PaymentError("پرداخت یافت نشد")
@@ -321,7 +350,10 @@ async def pay_order_with_wallet(
 
     payment = (
         await session.execute(
-            select(Payment).where(Payment.order_id == order.id).with_for_update()
+            select(Payment)
+            .where(Payment.order_id == order.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if payment is not None and payment.status is PaymentStatus.APPROVED:
@@ -431,19 +463,22 @@ async def approve_payment(
     # and fulfilment's gate use. This function used to lock the
     # payment first, so an approval racing a wallet payment could
     # take the locks in opposite order and deadlock.
-    payment_ref = (
-        await session.execute(select(Payment).where(Payment.id == payment_id))
+    payment_order_id = (
+        await session.execute(select(Payment.order_id).where(Payment.id == payment_id))
     ).scalar_one_or_none()
-    if payment_ref is None:
+    if payment_order_id is None:
         raise PaymentError("پرداخت یافت نشد")
     order = (
         await session.execute(
-            select(Order).where(Order.id == payment_ref.order_id).with_for_update()
+            select(Order).where(Order.id == payment_order_id).with_for_update().execution_options(populate_existing=True)
         )
     ).scalar_one()
     payment = (
         await session.execute(
-            select(Payment).where(Payment.id == payment_id).with_for_update()
+            select(Payment)
+            .where(Payment.id == payment_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one()
     if payment.status is PaymentStatus.APPROVED:
@@ -499,16 +534,18 @@ async def reject_payment(
     if not reason.strip():
         raise PaymentError("دلیل رد پرداخت الزامی است")
     # Same lock order as approve_payment: order row, then payment row.
-    payment_ref = (
-        await session.execute(select(Payment).where(Payment.id == payment_id))
+    payment_order_id = (
+        await session.execute(select(Payment.order_id).where(Payment.id == payment_id))
     ).scalar_one_or_none()
-    if payment_ref is None:
+    if payment_order_id is None:
         raise PaymentError("پرداخت یافت نشد")
     await session.execute(
-        select(Order).where(Order.id == payment_ref.order_id).with_for_update()
+        select(Order).where(Order.id == payment_order_id).with_for_update().execution_options(populate_existing=True)
     )
     payment = (
-        await session.execute(select(Payment).where(Payment.id == payment_id).with_for_update())
+        await session.execute(
+            select(Payment).where(Payment.id == payment_id).with_for_update().execution_options(populate_existing=True)
+        )
     ).scalar_one()
     if payment.status is PaymentStatus.REJECTED:
         return payment
@@ -579,10 +616,12 @@ async def expire_stale_payments(session: AsyncSession) -> int:
     ).all()
     count = 0
     for payment_id, order_id in candidate_ids:
-        await session.execute(select(Order).where(Order.id == order_id).with_for_update())
+        await session.execute(
+            select(Order).where(Order.id == order_id).with_for_update().execution_options(populate_existing=True)
+        )
         payment = (
             await session.execute(
-                select(Payment).where(Payment.id == payment_id).with_for_update()
+                select(Payment).where(Payment.id == payment_id).with_for_update().execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
         if (
