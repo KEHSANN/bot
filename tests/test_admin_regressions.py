@@ -2604,3 +2604,164 @@ async def test_gate_audit_survives_and_cancelled_skips(session, session_factory)
         session_factory, order_id=order2.id, cipher=cipher, deliver=deliver
     )
     assert result.outcome is fulfillment.FulfillOutcome.SKIPPED
+
+
+# --- Round 20: wallet double-spend, preview guard, TXID canon, jobs ---
+
+
+async def test_wallet_locked_read_refreshes_balance(session, session_factory) -> None:
+    """Deterministic staleness check: a session that cached the
+    account BEFORE another session drained it must still refuse the
+    second debit (populate_existing on the FOR UPDATE read)."""
+    from vpnbot.db.enums import LedgerKind
+    from vpnbot.services import wallet as wallet_service
+
+    user_id = 424_242  # wallet accounts key on the internal user id via FK in prod;
+    # here use a real user row:
+    from tests.factories import make_user
+
+    user = await make_user(session, telegram_id=900002001)
+    user_id = user.id
+    await wallet_service.credit(
+        session, user_id=user_id, amount_irt=250_000, kind=LedgerKind.TOPUP, key="ds-seed"
+    )
+    await session.commit()
+
+    async with session_factory() as stale, session_factory() as drainer:
+        await wallet_service.get_or_create_account(stale, user_id)  # caches 250k, no lock
+        await wallet_service.debit(
+            drainer, user_id=user_id, amount_irt=250_000, kind=LedgerKind.PURCHASE, key="ds-drain"
+        )
+        await drainer.commit()
+        try:
+            await wallet_service.debit(
+                stale, user_id=user_id, amount_irt=250_000, kind=LedgerKind.PURCHASE, key="ds-second"
+            )
+        except wallet_service.WalletError:
+            pass
+        else:
+            raise AssertionError("second debit against drained wallet must refuse (double-spend)")
+        await stale.rollback()
+    async with session_factory() as check:
+        assert await wallet_service.balance(check, user_id) == 0
+
+
+async def test_preview_cancel_spares_paid_order(session) -> None:
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import OrderStatus
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services import wallet as wallet_service
+
+    user = await make_user(session, telegram_id=900002011)
+    await wallet_service.credit(session, user_id=user.id, amount_irt=900_000, kind="TOPUP", key="pv-seed")
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 2, "prev")
+    paid = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    await payment_service.pay_order_with_wallet(session, order=paid, user_id=user.id)
+    # Direct guard: a customer-path cancel of the APPROVED order refuses.
+    try:
+        await order_service.cancel_order(session, paid.id, reason="x", by_customer=True)
+    except order_service.OrderError:
+        pass
+    else:
+        raise AssertionError("customer cancel of an approved order must refuse")
+    # And the preview sweep leaves it (and its money) alone.
+    fresh = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    await order_service.cancel_preview_orders(session, user_id=user.id, keep_order_id=fresh.id)
+    await session.refresh(paid)
+    assert paid.status is OrderStatus.FULFILLMENT_PENDING
+    assert await wallet_service.balance(session, user.id) == 900_000 - paid.total_irt
+
+
+async def test_txid_canonical_forms_collide(session) -> None:
+    from vpnbot.services.payments import normalize_txid
+
+    assert normalize_txid("0xABCDEF0123456789") == "abcdef0123456789"
+    assert normalize_txid("ABCDEF0123456789") == "abcdef0123456789"
+    assert normalize_txid("abcd-ef01_23456789") == "abcdef0123456789"
+
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import PaymentMethod
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services.settings import CRYPTO_SETTINGS, SettingsService
+
+    user = await make_user(session, telegram_id=900002021)
+    await SettingsService(session).set(
+        CRYPTO_SETTINGS, {"enabled": True, "address": "TXYZ", "network": "TRC20"}
+    )
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 2, "txid")
+    hexpart = "ab" * 32
+    o1 = await order_service.create_order(session, user_id=user.id, plan_id=plan.id, product=product, plan=plan)
+    p1 = await payment_service.start_payment(session, order=o1, method=PaymentMethod.CRYPTO)
+    await payment_service.submit_crypto_evidence(
+        session, payment_id=p1.id, user_id=user.id, txid=f"0x{hexpart}"
+    )
+    o2 = await order_service.create_order(session, user_id=user.id, plan_id=plan.id, product=product, plan=plan)
+    p2 = await payment_service.start_payment(session, order=o2, method=PaymentMethod.CRYPTO)
+    try:
+        await payment_service.submit_crypto_evidence(
+            session, payment_id=p2.id, user_id=user.id, txid=hexpart
+        )
+    except payment_service.PaymentError:
+        pass
+    else:
+        raise AssertionError("the same transfer without the 0x prefix must be refused as reused")
+
+
+async def test_worker_claims_fulfilment_first(session, session_factory) -> None:
+    from datetime import timedelta
+
+    from vpnbot.db.base import utcnow
+    from vpnbot.db.enums import JobKind, JobStatus
+    from vpnbot.db.models.system import Job
+    from vpnbot.jobs.worker import Worker
+
+    now = utcnow()
+    session.add_all(
+        [
+            Job(kind=JobKind.BROADCAST_RECIPIENT, payload={}, idempotency_key="prio-b",
+                status=JobStatus.QUEUED, scheduled_at=now - timedelta(minutes=5)),
+            Job(kind=JobKind.FULFILL_ORDER, payload={"order_id": 1}, idempotency_key="prio-f",
+                status=JobStatus.QUEUED, scheduled_at=now),
+        ]
+    )
+    await session.commit()
+    worker = object.__new__(Worker)
+    worker.session_factory = session_factory
+    claimed = await worker._claim()
+    assert claimed[0][1] is JobKind.FULFILL_ORDER
+
+
+async def test_support_thread_view_fits_telegram_limit(session, monkeypatch) -> None:
+    from tests.factories import make_user
+
+    from vpnbot.bot.handlers.admin import support as support_admin
+    from vpnbot.services import support as support_service
+
+    user = await make_user(session, telegram_id=900002031)
+    ticket = await support_service.create_ticket(session, user=user, text="<" * 2_500)
+    from vpnbot.db.enums import TicketSender
+
+    await support_service.add_message(
+        session, ticket=ticket, text="<" * 2_500,
+        sender_type=TicketSender.CUSTOMER, sender_id=user.id,
+    )
+    await session.commit()
+
+    captured: dict = {}
+
+    async def fake_reply(target, text, rows=None):  # noqa: ANN001, ANN202
+        captured["text"] = text
+
+    monkeypatch.setattr(support_admin.common, "reply", fake_reply)
+    await support_admin._show_thread(object(), session, object(), ticket.id)
+    assert len(captured["text"]) <= 4_096
