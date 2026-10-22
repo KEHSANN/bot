@@ -111,7 +111,7 @@ async def _show_list(
         f"<b>🧾 سفارش‌ها</b>\n\nفیلتر: {FILTER_LABELS.get(status_key, 'همه')} · "
         f"تعداد: <b>{common.money(total)}</b>",
         rows,
-    )
+    session=session)
 
 
 async def _show_order(
@@ -119,7 +119,7 @@ async def _show_order(
 ) -> None:
     order = await order_service.get_order(session, order_id)
     if order is None:
-        await common.reply(target, "سفارش یافت نشد.", [[common.back("orders")]])
+        await common.reply(target, "سفارش یافت نشد.", [[common.back("orders")]], session=session)
         return
     user = await session.get(User, order.user_id)
     user_line = "—"
@@ -165,7 +165,7 @@ async def _show_order(
     if payment is not None and payment.status is PaymentStatus.PENDING_REVIEW:
         rows.append([common.btn("💳 بررسی پرداخت", "payments", "view", payment.id)])
     rows.append([common.back("orders")])
-    await common.reply(target, "\n".join(lines), rows)
+    await common.reply(target, "\n".join(lines), rows, session=session)
 
 
 async def _requeue(session: AsyncSession, order: Order) -> bool:
@@ -265,7 +265,7 @@ async def orders_router(
             callback,
             "⛔️ <b>لغو سفارش</b>\n\nدلیل لغو را بنویسید (در پرونده ثبت می‌شود):",
             [common.cancel_row()],
-        )
+        session=session)
         return
 
     if action.startswith("list:"):

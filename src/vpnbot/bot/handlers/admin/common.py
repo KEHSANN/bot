@@ -143,8 +143,17 @@ def yes_no(section: str, action: str, item_id: int, *, page: int = 0) -> list[In
 # --------------------------------------------------------------------------
 # Sending
 # --------------------------------------------------------------------------
-async def reply(target: CallbackQuery | Message, text: str, rows: Sequence[Sequence[InlineKeyboardButton]] | None = None) -> None:
-    """Edit the callback's message, or send a new one for commands."""
+async def reply(target: CallbackQuery | Message, text: str, rows: Sequence[Sequence[InlineKeyboardButton]] | None = None, *, session: AsyncSession | None = None) -> None:
+    """Edit the callback's message, or send a new one for commands.
+
+    Pass ``session`` after mutation work: the handler transaction
+    (and its FOR UPDATE locks) then commits BEFORE the Telegram
+    call, the same phase split the customer side uses — an admin
+    action's result screen must not hold payment/order locks across
+    a network round-trip. Read-only re-renders may omit it.
+    """
+    if session is not None and session.in_transaction():
+        await session.commit()
     markup = InlineKeyboardMarkup(inline_keyboard=[list(r) for r in rows]) if rows else None
     if isinstance(target, CallbackQuery):
         message = target.message

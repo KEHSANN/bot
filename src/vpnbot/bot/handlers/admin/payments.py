@@ -72,7 +72,7 @@ async def _show_list(
         f"<b>💳 پرداخت‌های در انتظار بررسی: {common.money(total)}</b>\n\n"
         "هر مورد را باز کنید، رسید/هش را بررسی و سپس تأیید یا رد کنید.",
         rows,
-    )
+    session=session)
 
 
 async def _show_payment(
@@ -80,7 +80,7 @@ async def _show_payment(
 ) -> None:
     payment = await session.get(Payment, payment_id)
     if payment is None:
-        await common.reply(target, "پرداخت یافت نشد.", [[common.back("payments")]])
+        await common.reply(target, "پرداخت یافت نشد.", [[common.back("payments")]], session=session)
         return
     order = await order_service.get_order(session, payment.order_id)
     user_line = "—"
@@ -134,7 +134,7 @@ async def _show_payment(
     if payment.receipt_file_id and payment.receipt_file_type and isinstance(target, CallbackQuery):
         # The receipt is customer content, not inventory: safe for reviewers.
         pass
-    await common.reply(target, "\n".join(lines), rows)
+    await common.reply(target, "\n".join(lines), rows, session=session)
 
 
 async def _show_topups(
@@ -168,7 +168,7 @@ async def _show_topups(
         f"<b>➕ شارژهای کیف پول در انتظار بررسی: {common.money(total)}</b>\n\n"
         "با تأیید، مبلغ دقیقاً یک‌بار به کیف پول مشتری اضافه می‌شود.",
         rows,
-    )
+    session=session)
 
 
 async def _show_topup(
@@ -176,7 +176,7 @@ async def _show_topup(
 ) -> None:
     topup = await session.get(WalletTopUp, topup_id)
     if topup is None:
-        await common.reply(target, "درخواست شارژ یافت نشد.", [[common.back("topups")]])
+        await common.reply(target, "درخواست شارژ یافت نشد.", [[common.back("topups")]], session=session)
         return
     from vpnbot.db.models.users import User
 
@@ -218,7 +218,7 @@ async def _show_topup(
     if topup.receipt_file_id and topup.receipt_file_type:
         rows.append([common.btn("👁 نمایش رسید", "topups", "receipt", topup.id)])
     rows.append([common.back("topups")])
-    await common.reply(target, "\n".join(lines), rows)
+    await common.reply(target, "\n".join(lines), rows, session=session)
 
 
 @router.callback_query(AdminCB.filter(F.section == "topups"))
@@ -273,7 +273,7 @@ async def topups_router(
             "یادداشت تأیید را بفرستید (یا برای بدون یادداشت «-» بفرستید).\n"
             f"با تأیید، {common.money(topup.amount_irt)} تومان به کیف پول مشتری اضافه می‌شود.",
             [common.cancel_row()],
-        )
+        session=session)
         return
 
     if action == "reject":
@@ -288,7 +288,7 @@ async def topups_router(
             callback,
             f"<b>⛔️ رد شارژ #{topup.id}</b>\n\nدلیل رد را بفرستید:",
             [common.cancel_row()],
-        )
+        session=session)
         return
 
     await _show_topups(callback, session, admin, callback_data.page)
@@ -350,7 +350,7 @@ async def payments_router(
             "یادداشت تأیید را بفرستید (یا برای بدون یادداشت «-» بفرستید).\n"
             "با تأیید، کانفیگ برای مشتری ارسال می‌شود.",
             [common.cancel_row()],
-        )
+        session=session)
         return
 
     if action == "reject":
@@ -365,7 +365,7 @@ async def payments_router(
             callback,
             f"<b>⛔️ رد پرداخت #{payment.id}</b>\n\nدلیل رد را برای ثبت در پرونده بفرستید:",
             [common.cancel_row()],
-        )
+        session=session)
         return
 
     await _show_list(callback, session, admin, callback_data.page)

@@ -106,7 +106,7 @@ async def _show_menu(target: CallbackQuery | Message, session: AsyncSession, pag
         f"تعداد حساب‌ها: {common.money(total)}\n"
         "برای تنظیم موجودی، کاربر را انتخاب کنید یا جستجو کنید.",
         rows,
-    )
+    session=session)
 
 
 async def _show_user(
@@ -114,7 +114,7 @@ async def _show_user(
 ) -> None:
     user = await session.get(User, user_id)
     if user is None:
-        await common.reply(target, "کاربر یافت نشد.", [[common.back("wallet")]])
+        await common.reply(target, "کاربر یافت نشد.", [[common.back("wallet")]], session=session)
         return
     balance = await wallet_service.balance(session, user_id)
     entries = await wallet_service.history(session, user_id, limit=HISTORY_LIMIT)
@@ -153,7 +153,7 @@ async def _show_user(
         rows.append([common.btn("🚫 بلاک کاربر", "wallet", "block", user_id)])
     rows.append([common.btn("🔄 بروزرسانی", "wallet", "user", user_id)])
     rows.append([common.back("wallet")])
-    await common.reply(target, "\n".join(lines), rows)
+    await common.reply(target, "\n".join(lines), rows, session=session)
 
 
 @router.callback_query(AdminCB.filter(F.section == "wallet"))
@@ -181,7 +181,7 @@ async def wallet_router(
             "<b>🔍 جستجوی کاربر</b>\n\n"
             "شناسه عددی تلگرام یا نام کاربری (بدون @) را بفرستید.",
             [common.cancel_row()],
-        )
+        session=session)
         return
 
     if action == "user":
@@ -203,7 +203,7 @@ async def wallet_router(
             "• پرداخت‌ها و شارژهای در انتظار بررسی او لغو می‌شوند\n\n"
             "مطمئنید؟",
             [common.yes_no("wallet", "block_yes", user.id), [common.back("wallet")]],
-        )
+        session=session)
         return
 
     if action == "block_yes":
@@ -222,7 +222,7 @@ async def wallet_router(
             f"پرداخت‌های لغوشده: {common.money(result['payments_cancelled'])}\n"
             f"شارژهای لغوشده: {common.money(result['topups_cancelled'])}",
             [[common.back("wallet")]],
-        )
+        session=session)
         return
 
     if action == "unblock":
@@ -261,7 +261,7 @@ async def wallet_router(
             f"موجودی فعلی: <b>{common.money(balance)} تومان</b>\n\n"
             "مبلغ به تومان را بفرستید (مثلاً 50000).",
             [common.cancel_row()],
-        )
+        session=session)
         return
 
     if action == "adjust":
@@ -348,7 +348,7 @@ async def _apply_adjustment(
         f"{'افزایش' if signed > 0 else 'کاهش'}: <b>{common.money(abs(signed))} تومان</b>\n"
         f"موجودی جدید: <b>{common.money(result.balance_irt)} تومان</b>",
         [[common.btn("👛 مشاهده کاربر", "wallet", "user", user_id)], [common.back("wallet")]],
-    )
+    session=session)
 
 
 @router.message(AdminStates.wallet_adjust, F.chat.type == "private")

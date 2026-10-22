@@ -67,7 +67,7 @@ async def _show_list(
         f"<b>🎫 پشتیبانی</b>\n\nفیلتر: {FILTER_LABELS.get(filter_key, 'باز')} · "
         f"تعداد: <b>{common.money(total)}</b>",
         rows,
-    )
+    session=session)
 
 
 async def _show_thread(
@@ -75,10 +75,11 @@ async def _show_thread(
 ) -> None:
     ticket = await session.get(Ticket, ticket_id)
     if ticket is None:
-        await common.reply(target, "تیکت یافت نشد.", [[common.back("support")]])
+        await common.reply(target, "تیکت یافت نشد.", [[common.back("support")]], session=session)
         return
     user = await session.get(User, ticket.user_id)
-    messages = await support_service.ticket_messages(session, ticket_id)
+    messages = await support_service.ticket_messages(session, ticket_id, limit=THREAD_LIMIT)
+    total_messages = await support_service.ticket_message_count(session, ticket_id)
 
     lines = [
         f"<b>🎫 تیکت #{ticket.id}</b>",
@@ -92,7 +93,7 @@ async def _show_thread(
         "<b>— گفتگو —</b>",
     ]
     blocks: list[str] = []
-    for message in messages[-THREAD_LIMIT:]:
+    for message in messages:
         who = "👤 کاربر" if message.sender_type is TicketSender.CUSTOMER else "🛠 پشتیبانی"
         stamp = common.date(message.created_at, with_time=True)
         # Truncate the RAW text, then escape: cutting the escaped
@@ -102,8 +103,8 @@ async def _show_thread(
         if len(raw) > 200:
             raw = raw[:200] + "…"
         blocks.append(f"\n<b>{who}</b> · {stamp}\n{common.escape(raw)}")
-    if len(messages) > THREAD_LIMIT:
-        lines.insert(8, f"(نمایش {THREAD_LIMIT} پیام آخر از {len(messages)})")
+    if total_messages > THREAD_LIMIT:
+        lines.insert(8, f"(نمایش {THREAD_LIMIT} پیام آخر از {total_messages})")
     # Fit Telegram's 4096 cap by dropping the OLDEST blocks whole —
     # never by slicing the assembled string, which could cut a tag.
     total = len("\n".join(lines)) + sum(len(b) for b in blocks)
@@ -123,7 +124,7 @@ async def _show_thread(
             rows.append([common.btn("🚫 بلاک کاربر", "support", "block", ticket.id)])
     rows.append([common.btn("🔄 بروزرسانی", "support", "view", ticket.id)])
     rows.append([common.back("support")])
-    await common.reply(target, "\n".join(lines), rows)
+    await common.reply(target, "\n".join(lines), rows, session=session)
 
 
 @router.callback_query(AdminCB.filter(F.section == "support"))
@@ -166,7 +167,7 @@ async def support_router(
             f"✍️ <b>پاسخ به تیکت #{ticket.id}</b>\n\nمتن پاسخ را بنویسید؛ "
             "همین‌جا ثبت و برای کاربر ارسال می‌شود.",
             [common.cancel_row()],
-        )
+        session=session)
         return
 
     if action == "close":
@@ -195,7 +196,7 @@ async def support_router(
             "کاربر دیگر هیچ پیامی نمی‌تواند بدهد، همه رسیدهایش پاک و "
             "پرداخت‌ها و شارژهای در انتظارش لغو می‌شوند.\n\nمطمئنید؟",
             [common.yes_no("support", "block_yes", ticket.id), [common.back("support")]],
-        )
+        session=session)
         return
 
     if action == "block_yes":
@@ -219,7 +220,7 @@ async def support_router(
             f"پرداخت‌های لغوشده: {common.money(result['payments_cancelled'])}\n"
             f"شارژهای لغوشده: {common.money(result['topups_cancelled'])}",
             [[common.back("support")]],
-        )
+        session=session)
         return
 
     if action == "unblock":
