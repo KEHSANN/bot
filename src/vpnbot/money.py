@@ -63,14 +63,26 @@ def parse_amount_irt(raw: str) -> int:
         raise MoneyError("مبلغ نامعتبر است")
     try:
         value = Decimal(text)
-    except InvalidOperation as exc:
+    except (InvalidOperation, OverflowError, ValueError) as exc:
         # The raw input goes into a bot message rendered as HTML —
         # escape it, or an amount like "5<0" breaks the reply itself.
         raise MoneyError(f"مبلغ نامعتبر است: {html.escape(raw)!r}") from exc
+    if not value.is_finite():
+        # Infinity / NaN / sNaN: is_finite must precede every other
+        # operation — to_integral_value() on sNaN raises
+        # InvalidOperation and on Infinity raises OverflowError,
+        # neither of which callers catch (they expect MoneyError).
+        raise MoneyError(f"مبلغ نامعتبر است: {html.escape(raw)!r}")
     if value != value.to_integral_value():
         raise MoneyError("مبلغ باید عدد صحیح باشد؛ لطفاً بدون اعشار وارد کنید")
     if value < 0:
         raise MoneyError("مبلغ نمی‌تواند منفی باشد")
+    if value > MAX_AMOUNT_IRT * 10:
+        # Reject on MAGNITUDE before int(): int(Decimal("1e99999999"))
+        # materializes a ~100M-digit integer and froze the event loop
+        # for tens of seconds (a one-message DoS). The x10 headroom
+        # covers rial inputs, which are divided by 10 right after.
+        raise MoneyError("مبلغ واردشده بیش از سقف مجاز است")
     amount = int(value)
     result = rial_to_toman(amount) if is_rial else amount
     if result > MAX_AMOUNT_IRT:

@@ -98,6 +98,10 @@ async def create_order(
 async def get_order(
     session: AsyncSession, order_id: int, *, for_update: bool = False, with_payment: bool = True
 ) -> Order | None:
+    from vpnbot.db.base import sane_id
+
+    if not sane_id(order_id):
+        return None
     stmt = select(Order).where(Order.id == order_id)
     if with_payment:
         stmt = stmt.options(selectinload(Order.payment))
@@ -174,6 +178,10 @@ async def expire_stale_orders(session: AsyncSession) -> int:
     ttl_hours = int(config.get("order_ttl_hours", 48) or 0)
     if ttl_hours <= 0:
         return 0
+    # A hand-typed setting has no business exceeding ~114 years; an
+    # unbounded value would OverflowError the timedelta below and
+    # kill the worker's expiry loop. (Settings input is capped too.)
+    ttl_hours = min(ttl_hours, 1_000_000)
     cutoff = utcnow() - timedelta(hours=ttl_hours)
     orders = (
         await session.execute(

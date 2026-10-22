@@ -598,6 +598,8 @@ async def category_input(message: Message, session: AsyncSession, admin: Admin |
     title, _, order_raw = raw.partition("|")
     try:
         sort_order = int(order_raw.strip()) if order_raw.strip() else 0
+        if not (-(2**31) <= sort_order < 2**31):
+            sort_order = 0
     except ValueError:
         sort_order = 0
     category = await catalog_service.create_category(session, title=title.strip(), sort_order=sort_order)

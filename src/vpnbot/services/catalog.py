@@ -57,12 +57,20 @@ async def list_products(
 
 
 async def get_product(session: AsyncSession, product_id: int) -> Product | None:
+    from vpnbot.db.base import sane_id
+
+    if not sane_id(product_id):
+        return None
     return (
         await session.execute(select(Product).where(Product.id == product_id))
     ).scalar_one_or_none()
 
 
 async def get_plan(session: AsyncSession, plan_id: int) -> Plan | None:
+    from vpnbot.db.base import sane_id
+
+    if not sane_id(plan_id):
+        return None
     return (
         await session.execute(select(Plan).where(Plan.id == plan_id))
     ).scalar_one_or_none()

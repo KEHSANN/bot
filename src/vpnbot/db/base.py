@@ -33,6 +33,17 @@ class TimestampMixin:
     )
 
 
+def sane_id(value: object) -> bool:
+    """True when *value* can be a row id in this schema.
+
+    All id columns are PostgreSQL INTEGER (int32). Ids arrive from
+    callback data a user can forge: an out-of-range value makes
+    asyncpg raise an unhandled DataError instead of a clean
+    "not found", so service getters check this first.
+    """
+    return isinstance(value, int) and 0 < value < 2**31
+
+
 def enum_type(enum_cls: type[enum.Enum], name: str | None = None) -> sa.Enum:
     """Stored as VARCHAR + CHECK constraint (no native PG enum headaches)."""
     return sa.Enum(
