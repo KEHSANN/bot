@@ -152,6 +152,15 @@ class Worker:
             except Exception:  # noqa: BLE001 - the sweep must never kill the loop
                 log.exception("payment expiry sweep failed")
             try:
+                # recover() also runs at startup, but a job claimed
+                # seconds before a crash is not yet stale then — and
+                # without a periodic pass it would sit RUNNING
+                # forever. The sweeper cadence (5 min) bounds the
+                # extra wait past STALE_AFTER.
+                await self.recover()
+            except Exception:  # noqa: BLE001
+                log.exception("stale job recovery failed")
+            try:
                 await asyncio.wait_for(
                     self._stopping.wait(), timeout=EXPIRE_INTERVAL_SECONDS
                 )

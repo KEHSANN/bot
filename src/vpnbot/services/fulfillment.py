@@ -185,6 +185,18 @@ async def _reserve_and_gate(
             )
             return FulfillResult(FulfillOutcome.SKIPPED, order_id, order.status.value)
 
+        if order.delivery_status is DeliveryStatus.SENDING:
+            # Another execution is between reserve and finalize for
+            # this order (or crashed there). A fresh SENDING means
+            # "in flight right now": bouncing keeps two live jobs
+            # from delivering the same config twice. An OLD SENDING
+            # is a crash remnant — fall through and let the
+            # idempotent reserve sort it out.
+            from datetime import timedelta as _td
+
+            if order.updated_at and order.updated_at > utcnow() - _td(minutes=10):
+                return FulfillResult(FulfillOutcome.RETRY, order_id, "delivery already in progress")
+
         if payment is None or payment.status is not PaymentStatus.APPROVED:
             payment_status = payment.status.value if payment else None
             # The audit must OUTLIVE the refusal: recording it in this
