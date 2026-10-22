@@ -16,7 +16,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vpnbot.bot.handlers.customer.common import alert, base_context, money, sender_for
+from vpnbot.bot.handlers.customer.common import (
+    RECEIPT_REJECT_TEXT,
+    alert,
+    base_context,
+    edit_or_answer,
+    money,
+    receipt_file,
+    sender_for,
+)
 from vpnbot.bot.keyboards.callbacks import MenuCB, OrderPayCB, ProductCB, WalletBuyCB
 from vpnbot.bot.states import CheckoutStates
 from vpnbot.db.enums import OrderStatus, PaymentMethod, PaymentStatus
@@ -264,10 +272,15 @@ async def buy_with_wallet(
         # button): /cancel and the menu cancel can then cancel this
         # exact order instead of leaving it to the TTL sweep.
         await state.update_data(order_id=order.id, plan_id=plan.id, order_ref=order.public_id)
+        # DB work is done: commit before the Telegram calls so no
+        # row lock / pooled connection is held across the network
+        # (the same phase split ScreenSender.show performs).
+        await session.commit()
         await callback.answer()
         message = callback.message
         if isinstance(message, Message):
-            await message.answer(
+            await edit_or_answer(
+                message,
                 "👛 <b>خرید با کیف پول</b>\n\n"
                 f"محصول: {html.escape(product.title)}\n"
                 f"پلن: {html.escape(plan.title)}\n"
@@ -322,6 +335,10 @@ async def buy_with_wallet(
         await alert(callback, f"⚠️ {exc}")
         return
     await state.clear()
+    # DB work is done: commit before the Telegram calls so no row
+    # lock / pooled connection is held across the network (the same
+    # phase split ScreenSender.show performs).
+    await session.commit()
     await callback.answer("✅ پرداخت با کیف پول انجام شد")
     if isinstance(message, Message):
         new_balance = await wallet_service.balance(session, user.id)
@@ -414,6 +431,7 @@ async def _finish(
 ) -> None:
     data = await state.get_data()
     await state.clear()
+    await session.commit()
     await message.answer(success_text)
     if user is None:
         return
@@ -437,12 +455,11 @@ async def card_receipt(
         await state.clear()
         return
 
-    if message.photo:
-        file_id, file_type = message.photo[-1].file_id, "photo"
-    elif message.document:
-        file_id, file_type = message.document.file_id, "document"
-    else:  # pragma: no cover - filter guarantees one of the two
+    extracted = receipt_file(message)
+    if extracted is None:
+        await message.answer(RECEIPT_REJECT_TEXT)
         return
+    file_id, file_type = extracted
 
     try:
         await payment_service.submit_card_receipt(
@@ -467,10 +484,11 @@ async def crypto_evidence_file(
     if not txid:
         await message.answer("⚠️ هش تراکنش (TXID) را در توضیح (کپشن) همین فایل بنویسید.")
         return
-    if message.photo:
-        file_id, file_type = message.photo[-1].file_id, "photo"
-    else:
-        file_id, file_type = message.document.file_id, "document"
+    extracted = receipt_file(message)
+    if extracted is None:
+        await message.answer(RECEIPT_REJECT_TEXT)
+        return
+    file_id, file_type = extracted
     await _submit_crypto(message, session, user, state, txid, file_id, file_type)
 
 

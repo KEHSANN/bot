@@ -183,15 +183,33 @@ async def _requeue(session: AsyncSession, order: Order) -> bool:
     ).first()
     if existing is not None:
         return False
+    # Same fixed idempotency key as everywhere else (the old
+    # ``:retry:<timestamp>`` key minted a SECOND live job for the
+    # same order whenever a restock requeue raced this button — two
+    # executions, one config delivered twice). Upsert: revive the
+    # canonical job when it is FAILED/DONE/QUEUED-in-backoff.
+    from vpnbot.db.base import utcnow
+
     await session.execute(
         pg_insert(Job)
         .values(
             kind=JobKind.FULFILL_ORDER,
             payload={"order_id": order.id},
-            idempotency_key=f"fulfill:{order.id}:retry:{order.updated_at.timestamp():.0f}",
+            idempotency_key=f"fulfill:{order.id}",
             status=JobStatus.QUEUED,
         )
-        .on_conflict_do_nothing(index_elements=["idempotency_key"])
+        .on_conflict_do_update(
+            index_elements=["idempotency_key"],
+            set_={
+                "status": JobStatus.QUEUED,
+                "attempt": 0,
+                "scheduled_at": utcnow(),
+                "started_at": None,
+                "finished_at": None,
+                "last_error": None,
+            },
+            where=Job.status.in_([JobStatus.FAILED, JobStatus.DONE, JobStatus.QUEUED]),
+        )
     )
     order.delivery_status = DeliveryStatus.PENDING
     await session.flush()

@@ -15,7 +15,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vpnbot.bot.handlers.customer.common import alert, base_context, money, sender_for
+from vpnbot.bot.handlers.customer.common import (
+    RECEIPT_REJECT_TEXT,
+    alert,
+    base_context,
+    edit_or_answer,
+    money,
+    receipt_file,
+    sender_for,
+)
 from vpnbot.bot.keyboards.callbacks import MenuCB
 from vpnbot.bot.states import WalletStates
 from vpnbot.db.enums import LedgerKind, PaymentMethod
@@ -106,10 +114,11 @@ async def topup_start(
     await callback.answer()
     message = callback.message
     if isinstance(message, Message):
-        await message.answer(
+        await edit_or_answer(
+            message,
             "➕ <b>افزایش موجودی کیف پول</b>\n\n"
             f"مبلغ شارژ را به تومان بفرستید (حداقل {format_irt_plain(minimum)} تومان).\n"
-            "برای انصراف /start را بفرستید."
+            "برای انصراف /start را بفرستید.",
         )
 
 
@@ -179,6 +188,7 @@ async def topup_method(
 
     details = topup.instructions_snapshot or {}
     await state.update_data(topup_id=topup.id)
+    await session.commit()
     message = callback.message
     if not isinstance(message, Message):
         await callback.answer()
@@ -216,12 +226,11 @@ async def topup_receipt(
         return
     data = await state.get_data()
     topup_id = int(data.get("topup_id") or 0)
-    if message.photo:
-        file_id, file_type = message.photo[-1].file_id, "photo"
-    elif message.document is not None:
-        file_id, file_type = message.document.file_id, "document"
-    else:  # pragma: no cover - the filter guarantees photo or document
+    extracted = receipt_file(message)
+    if extracted is None:
+        await message.answer(RECEIPT_REJECT_TEXT)
         return
+    file_id, file_type = extracted
     try:
         await topup_service.submit_card_receipt(
             session, topup_id=topup_id, user_id=user.id, file_id=file_id, file_type=file_type
@@ -230,6 +239,7 @@ async def topup_receipt(
         await message.answer(f"⚠️ {exc}")
         return
     await state.clear()
+    await session.commit()
     await message.answer(
         "✅ رسید شارژ ثبت شد.\n"
         "پس از بررسی و تأیید پشتیبانی، مبلغ به موجودی کیف پول شما اضافه می‌شود."
@@ -254,10 +264,11 @@ async def topup_txid_file(
     if not txid:
         await message.answer("⚠️ هش تراکنش (TXID) را در توضیح (کپشن) همین فایل بنویسید.")
         return
-    if message.photo:
-        file_id, file_type = message.photo[-1].file_id, "photo"
-    else:
-        file_id, file_type = message.document.file_id, "document"
+    extracted = receipt_file(message)
+    if extracted is None:
+        await message.answer(RECEIPT_REJECT_TEXT)
+        return
+    file_id, file_type = extracted
     await _submit_topup_txid(message, session, user, state, txid, file_id, file_type)
 
 
@@ -292,6 +303,7 @@ async def _submit_topup_txid(
         await message.answer(f"⚠️ {exc}")
         return
     await state.clear()
+    await session.commit()
     await message.answer(
         "✅ هش تراکنش ثبت شد.\n"
         "پس از بررسی و تأیید پشتیبانی، مبلغ به موجودی کیف پول شما اضافه می‌شود."

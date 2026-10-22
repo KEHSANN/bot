@@ -37,6 +37,8 @@ from vpnbot.services.screens import STAGE_MY_ORDERS, STAGE_ORDER_DETAIL
 log = logging.getLogger(__name__)
 router = Router(name="customer.orders")
 
+_REVEAL_AT: dict[int, float] = {}
+
 ORDER_LABELS: dict[OrderStatus, str] = {
     OrderStatus.PENDING_PAYMENT: "در انتظار پرداخت",
     OrderStatus.PAID: "پرداخت شده",
@@ -263,6 +265,18 @@ async def reveal_config(
     if user is None:
         await callback.answer()
         return
+    # Reveal cooldown: the config goes out as a NEW message per tap,
+    # so an unrestrained button eats the bot's global Telegram send
+    # budget (~30/s shared by everyone, deliveries included).
+    import time as _time
+
+    now = _time.monotonic()
+    if now - _REVEAL_AT.get(user.id, 0.0) < 30.0:
+        await callback.answer("⏳ کانفیگ را تازه فرستادم؛ چند ثانیه صبر کنید", show_alert=False)
+        return
+    if len(_REVEAL_AT) > 10_000:
+        _REVEAL_AT.clear()
+    _REVEAL_AT[user.id] = now
     order = await order_service.user_order(session, order_id=callback_data.order_id, user_id=user.id)
     if order is None:
         await alert(callback, "این سفارش یافت نشد")

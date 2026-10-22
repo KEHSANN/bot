@@ -11,7 +11,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vpnbot.bot.handlers.customer.common import alert, base_context, sender_for
+from vpnbot.bot.handlers.customer.common import alert, base_context, edit_or_answer, sender_for
 from vpnbot.bot.keyboards.callbacks import MenuCB
 from vpnbot.bot.states import SupportStates
 from vpnbot.db.models.users import User
@@ -50,10 +50,11 @@ async def begin_ticket(
     await state.set_state(SupportStates.awaiting_message)
     await callback.answer()
     if isinstance(callback.message, Message):
-        await callback.message.answer(
+        await edit_or_answer(
+            callback.message,
             "✍️ پیام خود را بنویسید.\n"
             "هرچه دقیق‌تر توضیح دهید، سریع‌تر پاسخ می‌گیرید.\n\n"
-            "برای انصراف /cancel را بفرستید."
+            "برای انصراف /cancel را بفرستید.",
         )
 
 

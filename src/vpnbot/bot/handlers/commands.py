@@ -41,6 +41,8 @@ async def _cancel(
 
         await cancel_open_order_from_state(session, user, state)
     await state.clear()
+    if session is not None:
+        await session.commit()
     await message.answer("عملیات لغو شد.")
 
 
