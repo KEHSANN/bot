@@ -2404,3 +2404,66 @@ async def test_topup_submit_after_expiry_refused(session) -> None:
         pass
     else:
         raise AssertionError("receipt onto an expired top-up must be refused")
+
+
+# --- Round 18: amount DoS, submit lock order, start guards, id ranges ---
+
+
+def test_parse_amount_scientific_bomb_rejected_fast() -> None:
+    import time
+
+    from vpnbot.money import MoneyError, parse_amount_irt
+
+    for bad in ("1e99999999", "1e999999", "Infinity", "sNaN", "NaN", "-Infinity"):
+        start = time.monotonic()
+        try:
+            parse_amount_irt(bad)
+        except MoneyError:
+            pass
+        else:
+            raise AssertionError(f"{bad} must be refused")
+        assert time.monotonic() - start < 1.0  # the old code froze ~20s
+    assert parse_amount_irt("1e5") == 100_000  # legitimate forms still parse
+    assert parse_amount_irt("۱۰۰٬۰۰۰") == 100_000
+
+
+async def test_start_payment_refuses_dead_states(session) -> None:
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import PaymentMethod, PaymentStatus
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services.settings import CARD_SETTINGS, SettingsService
+
+    user = await make_user(session, telegram_id=900001801)
+    await SettingsService(session).set(
+        CARD_SETTINGS,
+        {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
+    )
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 1, "dead")
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    payment = await payment_service.start_payment(session, order=order, method=PaymentMethod.CARD)
+    await order_service.cancel_order(session, order.id, reason="x")
+    await session.refresh(payment)
+    assert payment.status is PaymentStatus.CANCELLED
+    # A stale checkout state must not resurrect the closed payment.
+    try:
+        await payment_service.start_payment(session, order=order, method=PaymentMethod.CARD)
+    except payment_service.PaymentError:
+        pass
+    else:
+        raise AssertionError("start_payment on a cancelled order must refuse")
+
+
+async def test_forged_huge_ids_are_not_found(session) -> None:
+    from vpnbot.services import catalog as catalog_service
+    from vpnbot.services import orders as order_service
+
+    huge = 99999999999999999999
+    assert await catalog_service.get_product(session, huge) is None
+    assert await catalog_service.get_plan(session, huge) is None
+    assert await order_service.get_order(session, huge) is None
+    assert await order_service.get_order(session, -5) is None
