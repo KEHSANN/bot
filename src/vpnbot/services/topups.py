@@ -124,7 +124,10 @@ async def _topup_for_user(session: AsyncSession, topup_id: int, user_id: int) ->
         raise TopUpError("درخواست شارژ یافت نشد")
     topup = (
         await session.execute(
-            select(WalletTopUp).where(WalletTopUp.id == topup_id).with_for_update()
+            select(WalletTopUp)
+            .where(WalletTopUp.id == topup_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if topup is None or topup.user_id != user_id:
@@ -208,7 +211,12 @@ async def approve_topup(
 ) -> WalletTopUp:
     """Idempotent approval: credits the wallet exactly once."""
     topup = (
-        await session.execute(select(WalletTopUp).where(WalletTopUp.id == topup_id).with_for_update())
+        await session.execute(
+            select(WalletTopUp)
+            .where(WalletTopUp.id == topup_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     ).scalar_one_or_none()
     if topup is None:
         raise TopUpError("درخواست شارژ یافت نشد")
@@ -261,7 +269,12 @@ async def reject_topup(
     if not reason.strip():
         raise TopUpError("دلیل رد الزامی است")
     topup = (
-        await session.execute(select(WalletTopUp).where(WalletTopUp.id == topup_id).with_for_update())
+        await session.execute(
+            select(WalletTopUp)
+            .where(WalletTopUp.id == topup_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
     ).scalar_one_or_none()
     if topup is None:
         raise TopUpError("درخواست شارژ یافت نشد")

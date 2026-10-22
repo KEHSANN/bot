@@ -54,7 +54,22 @@ class Product(Base, TimestampMixin):
 
     @property
     def is_on_sale(self) -> bool:
-        return self.is_active and self.sales_enabled and self.archived_at is None
+        # The parent category gates too: the shop list filters
+        # inactive categories at query level, but a stale product
+        # button in an old chat message reaches checkout with just
+        # this check — a product in a disabled category must not be
+        # orderable. ``category`` is joined-loaded on every query
+        # path; read it from __dict__ so an in-memory instance whose
+        # relationship was never loaded doesn't trigger a lazy load
+        # (which would raise MissingGreenlet in async contexts) —
+        # unloaded means "no evidence of a disabled category".
+        category = self.__dict__.get("category")
+        return (
+            self.is_active
+            and self.sales_enabled
+            and self.archived_at is None
+            and (category is None or category.is_active)
+        )
 
 
 class Plan(Base, TimestampMixin):

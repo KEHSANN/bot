@@ -91,20 +91,26 @@ async def _show_thread(
         "",
         "<b>— گفتگو —</b>",
     ]
+    blocks: list[str] = []
     for message in messages[-THREAD_LIMIT:]:
         who = "👤 کاربر" if message.sender_type is TicketSender.CUSTOMER else "🛠 پشتیبانی"
         stamp = common.date(message.created_at, with_time=True)
-        # Truncate: 12 messages of up to 3000 chars (escape expands
-        # "<" fourfold) blew past Telegram's 4096-char message cap,
-        # so the thread view itself raised TelegramBadRequest and the
-        # ticket — reply/close/block buttons live only on this
-        # screen — became permanently unmanageable.
-        body = common.escape(message.text)
-        if len(body) > 300:
-            body = body[:300] + "…"
-        lines.append(f"\n<b>{who}</b> · {stamp}\n{body}")
+        # Truncate the RAW text, then escape: cutting the escaped
+        # string could slice an "&lt;" entity (or a tag) in half and
+        # Telegram would reject the whole view as unparsable HTML.
+        raw = message.text
+        if len(raw) > 200:
+            raw = raw[:200] + "…"
+        blocks.append(f"\n<b>{who}</b> · {stamp}\n{common.escape(raw)}")
     if len(messages) > THREAD_LIMIT:
         lines.insert(8, f"(نمایش {THREAD_LIMIT} پیام آخر از {len(messages)})")
+    # Fit Telegram's 4096 cap by dropping the OLDEST blocks whole —
+    # never by slicing the assembled string, which could cut a tag.
+    total = len("\n".join(lines)) + sum(len(b) for b in blocks)
+    while blocks and total > 3_800:
+        dropped = blocks.pop(0)
+        total -= len(dropped) + 1
+    lines.extend(blocks)
 
     rows: list[list] = []
     if ticket.status is not TicketStatus.CLOSED:
@@ -117,10 +123,7 @@ async def _show_thread(
             rows.append([common.btn("🚫 بلاک کاربر", "support", "block", ticket.id)])
     rows.append([common.btn("🔄 بروزرسانی", "support", "view", ticket.id)])
     rows.append([common.back("support")])
-    text = "\n".join(lines)
-    if len(text) > 3_900:  # final safety net under Telegram's 4096 cap
-        text = text[:3_900] + "…"
-    await common.reply(target, text, rows)
+    await common.reply(target, "\n".join(lines), rows)
 
 
 @router.callback_query(AdminCB.filter(F.section == "support"))
