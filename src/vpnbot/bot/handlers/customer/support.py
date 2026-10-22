@@ -24,8 +24,9 @@ router = Router(name="customer.support")
 
 @router.callback_query(MenuCB.filter(F.action == "support"))
 async def open_support(
-    callback: CallbackQuery, session: AsyncSession, user: User | None
+    callback: CallbackQuery, session: AsyncSession, user: User | None, state: FSMContext
 ) -> None:
+    await state.clear()  # navigation resets any in-progress wizard state
     if user is None:
         await callback.answer()
         return
@@ -47,6 +48,7 @@ async def begin_ticket(
     if not config.get("enabled", True):
         await alert(callback, "پشتیبانی در حال حاضر غیرفعال است")
         return
+    await state.clear()
     await state.set_state(SupportStates.awaiting_message)
     await callback.answer()
     if isinstance(callback.message, Message):

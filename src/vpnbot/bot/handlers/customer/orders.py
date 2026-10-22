@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -122,8 +123,13 @@ async def _show_page(
 
 @router.callback_query(MenuCB.filter(F.action == "orders"))
 async def my_orders(
-    callback: CallbackQuery, callback_data: MenuCB, session: AsyncSession, user: User | None
+    callback: CallbackQuery,
+    callback_data: MenuCB,
+    session: AsyncSession,
+    user: User | None,
+    state: FSMContext,
 ) -> None:
+    await state.clear()  # navigation resets any in-progress wizard state
     await _show_page(callback, session, user, callback_data.page)
 
 
@@ -276,7 +282,9 @@ async def reveal_config(
         return
     if len(_REVEAL_AT) > 10_000:
         _REVEAL_AT.clear()
-    _REVEAL_AT[user.id] = now
+    # The timestamp is stamped at SEND time below, not here: a tap
+    # that fails validation (order not delivered, no item, decrypt
+    # error) must not burn the customer's cooldown.
     order = await order_service.user_order(session, order_id=callback_data.order_id, user_id=user.id)
     if order is None:
         await alert(callback, "این سفارش یافت نشد")
@@ -309,6 +317,8 @@ async def reveal_config(
         log.exception("customer reveal failed for order %s", order.id)
         await alert(callback, "نمایش کانفیگ ممکن نشد؛ با پشتیبانی در تماس باشید")
         return
+    _REVEAL_AT[user.id] = _time.monotonic()
+    await session.commit()  # reads are done; release the tx before the network send
     try:
         await send_config_pair(
             callback.bot,
@@ -319,6 +329,7 @@ async def reveal_config(
             order_ref=order.public_id,
         )
     except Exception:  # noqa: BLE001
+        _REVEAL_AT.pop(user.id, None)  # a failed send does not consume the cooldown
         log.exception("customer reveal send failed for order %s", order.id)
         await alert(callback, "ارسال کانفیگ ناموفق بود؛ دوباره تلاش کنید")
         return

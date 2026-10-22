@@ -110,6 +110,7 @@ async def topup_start(
         await alert(callback, "شارژ کیف پول در حال حاضر غیرفعال است")
         return
     minimum = await topup_service.min_topup_irt(session)
+    await state.clear()
     await state.set_state(WalletStates.entering_amount)
     await callback.answer()
     message = callback.message

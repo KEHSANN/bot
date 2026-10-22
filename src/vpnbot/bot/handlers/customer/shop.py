@@ -65,7 +65,10 @@ def _plan_details(plan: Plan) -> str:
 
 
 @router.callback_query(MenuCB.filter(F.action.in_({"shop", "cats"})))
-async def open_shop(callback: CallbackQuery, session: AsyncSession, user: User | None) -> None:
+async def open_shop(
+    callback: CallbackQuery, session: AsyncSession, user: User | None, state: FSMContext
+) -> None:
+    await state.clear()  # navigation resets any in-progress wizard state
     categories = await catalog_service.list_categories(session)
     rows = [
         [InlineKeyboardButton(text=c.title, callback_data=CategoryCB(category_id=c.id).pack())]
@@ -166,8 +169,13 @@ async def open_category(
 
 @router.callback_query(MenuCB.filter(F.action == "prods"))
 async def products_page(
-    callback: CallbackQuery, callback_data: MenuCB, session: AsyncSession, user: User | None
+    callback: CallbackQuery,
+    callback_data: MenuCB,
+    session: AsyncSession,
+    user: User | None,
+    state: FSMContext,
 ) -> None:
+    await state.clear()
     await _show_products(callback, session, user, category_id=0, page=callback_data.page)
 
 

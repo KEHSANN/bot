@@ -132,11 +132,21 @@ async def cmd_menu(message: Message, session: AsyncSession, user: User | None, s
 
 @router.callback_query(MenuCB.filter(F.action.in_(set(STATIC_ACTIONS))))
 async def static_nav(
-    callback: CallbackQuery, callback_data: MenuCB, session: AsyncSession, user: User | None
+    callback: CallbackQuery,
+    callback_data: MenuCB,
+    session: AsyncSession,
+    user: User | None,
+    state: FSMContext,
 ) -> None:
     if user is None:
         await callback.answer()
         return
+    # Navigation is a state reset: without this, an admin mid-wizard
+    # (payment note, wallet adjust, broadcast…) who taps a customer
+    # menu button stays in the wizard state, and their next text
+    # message is consumed as wizard input — the customer-section
+    # entries were the ones the earlier bleed fixes missed.
+    await state.clear()
     sender = sender_for(callback.bot, session)
     await sender.show(callback, STATIC_ACTIONS[callback_data.action], base_context(user))
 

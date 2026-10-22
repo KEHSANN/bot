@@ -18,6 +18,7 @@ def sender_for(bot: Any, session: AsyncSession) -> ScreenSender:
 
 
 RECEIPT_DOCUMENT_MIMES = {"image/jpeg", "image/png", "image/webp", "application/pdf"}
+RECEIPT_DOCUMENT_EXTS = {".pdf", ".jpg", ".jpeg", ".png", ".webp"}
 RECEIPT_MAX_BYTES = 10 * 1024 * 1024
 
 
@@ -38,6 +39,16 @@ def receipt_file(message: Message) -> tuple[str, str] | None:
         return None
     if (document.mime_type or "") not in RECEIPT_DOCUMENT_MIMES:
         return None
+    # mime_type is client-supplied metadata (a modified client can
+    # label an .apk as application/pdf), so the file NAME's extension
+    # must agree with the allowlist too when one is present.
+    file_name = getattr(document, "file_name", None)
+    if file_name:
+        import os
+
+        ext = os.path.splitext(file_name)[1].lower()
+        if ext not in RECEIPT_DOCUMENT_EXTS:
+            return None
     if document.file_size is not None and document.file_size > RECEIPT_MAX_BYTES:
         return None
     return document.file_id, "document"

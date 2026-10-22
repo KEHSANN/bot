@@ -252,6 +252,14 @@ async def buy_with_wallet(
                 .limit(1)
             )
         ).scalar_one_or_none()
+        # Sweep stale payment-less previews BEFORE resolving: the
+        # open-order cap is enforced inside create_order, so when no
+        # reusable order exists the resolve died on the cap even
+        # though this sweep (which used to run after it) would have
+        # freed the slots. The reuse candidate is kept.
+        await order_service.cancel_preview_orders(
+            session, user_id=user.id, keep_order_id=open_order.id if open_order else 0
+        )
         try:
             resolved = await _resolve_order(
                 session, user=user, plan_id=plan.id,
@@ -264,10 +272,6 @@ async def buy_with_wallet(
             await alert(callback, "این محصول در دسترس نیست")
             return
         order, _plan = resolved
-        # A fresh wallet preview supersedes the customer's other
-        # payment-less previews, so browsing prices can never exhaust
-        # the open-order cap on its own.
-        await order_service.cancel_preview_orders(session, user_id=user.id, keep_order_id=order.id)
         # Bind the order in FSM state too (not only in the confirm
         # button): /cancel and the menu cancel can then cancel this
         # exact order instead of leaving it to the TTL sweep.
