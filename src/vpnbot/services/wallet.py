@@ -125,6 +125,14 @@ async def apply(
                 .where(WalletAccount.id == locked.id)
                 .values(balance_irt=new_balance, updated_at=utcnow())
             )
+            # Belt and braces: pin the identity-map instance to the
+            # value just written. The Core UPDATE's evaluate-sync
+            # already keeps it exact (verified by probe through
+            # pay_order_with_wallet: post-commit balance() in the
+            # same session == a fresh session's), but spelling it
+            # out keeps that true even if the UPDATE's shape ever
+            # stops being evaluable.
+            locked.balance_irt = new_balance
             session.add(entry)
             await session.flush()
     except IntegrityError:
