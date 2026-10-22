@@ -75,7 +75,8 @@ async def requeue_pending_for_product(session: AsyncSession, *, product_id: int)
     customer paid, and restocking did nothing. Called after a stock
     import, this resets every FULFILLMENT_PENDING order's job to
     QUEUED with a fresh attempt budget (or inserts it if missing).
-    Live QUEUED/RUNNING jobs are left alone.
+    RUNNING jobs are left alone; a QUEUED job still waiting out its
+    backoff is pulled forward to now (its schedule resets below).
     """
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -111,7 +112,7 @@ async def requeue_pending_for_product(session: AsyncSession, *, product_id: int)
                     "finished_at": None,
                     "last_error": None,
                 },
-                where=Job.status.in_([JobStatus.FAILED, JobStatus.DONE]),
+                where=Job.status.in_([JobStatus.FAILED, JobStatus.DONE, JobStatus.QUEUED]),
             )
         )
         count += 1
@@ -158,7 +159,10 @@ async def _reserve_and_gate(
         # and the reservation.
         payment = (
             await session.execute(
-                select(Payment).where(Payment.order_id == order_id).with_for_update()
+                select(Payment)
+                .where(Payment.order_id == order_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
 

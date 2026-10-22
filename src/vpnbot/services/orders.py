@@ -263,8 +263,18 @@ async def cancel_preview_orders(
     ).scalars()
     count = 0
     for stale in rows:
-        await cancel_order(session, stale.id, reason="جایگزین‌شده با پیش‌نمایش جدید")
-        count += 1
+        # by_customer + suppress: the scan above is unlocked, so a
+        # preview may have been wallet-paid a moment ago — the guard
+        # refuses then (PENDING_REVIEW / APPROVED under lock) and the
+        # preview flow carries on instead of cancelling a paid order
+        # and refunding it behind the customer's back.
+        import contextlib
+
+        with contextlib.suppress(OrderError):
+            await cancel_order(
+                session, stale.id, reason="جایگزین‌شده با پیش‌نمایش جدید", by_customer=True
+            )
+            count += 1
     return count
 
 
@@ -283,16 +293,14 @@ async def cancel_order(
         from vpnbot.db.enums import PaymentStatus as _PS
         from vpnbot.db.models.orders import Payment as _Payment
 
-        locked_payment = None
-        if order.payment is not None:
-            locked_payment = (
-                await session.execute(
-                    select(_Payment)
-                    .where(_Payment.id == order.payment.id)
-                    .with_for_update()
-                    .execution_options(populate_existing=True)
-                )
-            ).scalar_one_or_none()
+        locked_payment = (
+            await session.execute(
+                select(_Payment)
+                .where(_Payment.order_id == order.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
         if locked_payment is not None and locked_payment.status in (
             _PS.PENDING_REVIEW,
             _PS.APPROVED,

@@ -27,7 +27,7 @@ from datetime import timedelta
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -175,7 +175,14 @@ class Worker:
                 await session.execute(
                     select(Job)
                     .where(Job.status == JobStatus.QUEUED, Job.scheduled_at <= now)
-                    .order_by(Job.scheduled_at, Job.id)
+                    # Deliveries first: a broadcast to thousands or a
+                    # support-notify burst must not park paid orders'
+                    # FULFILL_ORDER jobs behind bulk traffic.
+                    .order_by(
+                        case((Job.kind == JobKind.FULFILL_ORDER, 0), else_=1),
+                        Job.scheduled_at,
+                        Job.id,
+                    )
                     .limit(CLAIM_BATCH)
                     .with_for_update(skip_locked=True)
                 )

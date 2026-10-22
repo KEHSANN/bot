@@ -94,7 +94,15 @@ async def _show_thread(
     for message in messages[-THREAD_LIMIT:]:
         who = "👤 کاربر" if message.sender_type is TicketSender.CUSTOMER else "🛠 پشتیبانی"
         stamp = common.date(message.created_at, with_time=True)
-        lines.append(f"\n<b>{who}</b> · {stamp}\n{common.escape(message.text)}")
+        # Truncate: 12 messages of up to 3000 chars (escape expands
+        # "<" fourfold) blew past Telegram's 4096-char message cap,
+        # so the thread view itself raised TelegramBadRequest and the
+        # ticket — reply/close/block buttons live only on this
+        # screen — became permanently unmanageable.
+        body = common.escape(message.text)
+        if len(body) > 300:
+            body = body[:300] + "…"
+        lines.append(f"\n<b>{who}</b> · {stamp}\n{body}")
     if len(messages) > THREAD_LIMIT:
         lines.insert(8, f"(نمایش {THREAD_LIMIT} پیام آخر از {len(messages)})")
 
@@ -109,7 +117,10 @@ async def _show_thread(
             rows.append([common.btn("🚫 بلاک کاربر", "support", "block", ticket.id)])
     rows.append([common.btn("🔄 بروزرسانی", "support", "view", ticket.id)])
     rows.append([common.back("support")])
-    await common.reply(target, "\n".join(lines), rows)
+    text = "\n".join(lines)
+    if len(text) > 3_900:  # final safety net under Telegram's 4096 cap
+        text = text[:3_900] + "…"
+    await common.reply(target, text, rows)
 
 
 @router.callback_query(AdminCB.filter(F.section == "support"))
