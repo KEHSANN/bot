@@ -600,7 +600,7 @@ async def test_block_user_wipes_receipts_and_cancels_pending(session) -> None:
     )
 
     result = await user_admin_service.block_user(session, user_id=user.id, admin_id=admin.id)
-    assert result == {"receipts_cleared": 3, "payments_cancelled": 1, "topups_cancelled": 1}
+    assert result == {"receipts_cleared": 3, "payments_cancelled": 1, "orders_cancelled": 1, "topups_cancelled": 1}
     assert user.status is UserStatus.BLOCKED and user.is_blocked
 
     await session.refresh(pending_payment)
@@ -2256,3 +2256,90 @@ async def test_enum_check_constraint_exists(session) -> None:
         await session.rollback()
     else:
         raise AssertionError("out-of-enum status must violate the CHECK constraint")
+
+
+# --- Round 16: block/unblock deadlock, resume checks, subscription -----
+
+
+async def test_block_user_cancels_orders_and_unblocks_cap(session) -> None:
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import OrderStatus, PaymentMethod
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services import user_admin
+    from vpnbot.services.settings import CARD_SETTINGS, SettingsService
+
+    user = await make_user(session, telegram_id=900001601)
+    await SettingsService(session).set(
+        CARD_SETTINGS,
+        {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
+    )
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 5, "blockx")
+    orders = []
+    for _ in range(3):
+        order = await order_service.create_order(
+            session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+        )
+        await payment_service.start_payment(session, order=order, method=PaymentMethod.CARD)
+        orders.append(order)
+
+    result = await user_admin.block_user(session, user_id=user.id, admin_id=None)
+    assert result["orders_cancelled"] == 3
+    for order in orders:
+        await session.refresh(order)
+        assert order.status is OrderStatus.CANCELLED
+
+    await user_admin.unblock_user(session, user_id=user.id, admin_id=None)
+    # The cap is free again: a fresh order can be created right away.
+    fresh = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    assert fresh.status is OrderStatus.PENDING_PAYMENT
+
+
+async def test_expire_accepts_cancelled_payment_orders(session) -> None:
+    from datetime import timedelta
+
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.base import utcnow
+    from vpnbot.db.enums import OrderStatus, PaymentMethod, PaymentStatus
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services.settings import CARD_SETTINGS, SHOP_SETTINGS, SettingsService
+
+    user = await make_user(session, telegram_id=900001611)
+    settings = SettingsService(session)
+    await settings.set(
+        CARD_SETTINGS,
+        {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
+    )
+    await settings.set(SHOP_SETTINGS, {"order_ttl_hours": 1})
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 1, "stuck")
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    payment = await payment_service.start_payment(session, order=order, method=PaymentMethod.CARD)
+    # Simulate the legacy stuck state: payment cancelled (old block
+    # behaviour), order left PENDING_PAYMENT, aged past the TTL.
+    payment.status = PaymentStatus.CANCELLED
+    order.created_at = utcnow() - timedelta(hours=3)
+    await session.flush()
+
+    assert await order_service.expire_stale_orders(session) == 1
+    await session.refresh(order)
+    assert order.status is OrderStatus.CANCELLED
+
+
+async def test_subscription_csv_sub_only_rows(session) -> None:
+    from vpnbot.services import import_service
+
+    records = import_service.parse_records(
+        "sub_url\nhttps://example.com/sub/one\nhttps://example.com/sub/two",
+        subscription_links=True,
+    )
+    assert len(records) == 2
+    assert all(r.error is None and r.config == r.sub_url for r in records)
