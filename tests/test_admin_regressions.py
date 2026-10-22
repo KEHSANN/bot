@@ -2865,3 +2865,106 @@ async def test_product_not_on_sale_when_category_disabled(session) -> None:
     await session.flush()
     await session.refresh(product.category)
     assert product.is_on_sale
+
+
+# --- Round 23: receipt allowlist, stale recovery, requeue key, gate ---
+
+
+def test_receipt_file_allowlist() -> None:
+    from types import SimpleNamespace
+
+    from vpnbot.bot.handlers.customer.common import receipt_file
+
+    photo_msg = SimpleNamespace(photo=[SimpleNamespace(file_id="ph")], document=None)
+    assert receipt_file(photo_msg) == ("ph", "photo")
+
+    def doc(mime, size):  # noqa: ANN001, ANN202
+        return SimpleNamespace(
+            photo=None,
+            document=SimpleNamespace(file_id="d", mime_type=mime, file_size=size),
+        )
+
+    assert receipt_file(doc("application/pdf", 5_000_000)) == ("d", "document")
+    assert receipt_file(doc("image/png", 100)) == ("d", "document")
+    assert receipt_file(doc("application/vnd.android.package-archive", 100)) is None
+    assert receipt_file(doc("text/html", 100)) is None
+    assert receipt_file(doc("image/png", 11 * 1024 * 1024)) is None  # over 10 MB
+
+
+async def test_recover_requeues_stale_running(session, session_factory) -> None:
+    from datetime import timedelta
+
+    from vpnbot.db.base import utcnow
+    from vpnbot.db.enums import JobKind, JobStatus
+    from vpnbot.db.models.system import Job
+    from vpnbot.jobs.worker import Worker
+
+    job = Job(
+        kind=JobKind.FULFILL_ORDER, payload={"order_id": 1}, idempotency_key="stale-1",
+        status=JobStatus.RUNNING, scheduled_at=utcnow() - timedelta(minutes=30),
+        started_at=utcnow() - timedelta(minutes=20),
+    )
+    session.add(job)
+    await session.commit()
+    worker = object.__new__(Worker)
+    worker.session_factory = session_factory
+    await worker.recover()
+    await session.refresh(job)
+    assert job.status is JobStatus.QUEUED
+
+
+async def test_admin_requeue_uses_canonical_key(session) -> None:
+    from sqlalchemy import select
+
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.bot.handlers.admin.orders import _requeue
+    from vpnbot.db.enums import JobStatus
+    from vpnbot.db.models.system import Job
+    from vpnbot.services import orders as order_service
+
+    user = await make_user(session, telegram_id=900002301)
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 1, "req")
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    assert await _requeue(session, order) is True
+    assert await _requeue(session, order) is False  # already queued — no twin job
+    rows = (
+        await session.execute(select(Job).where(Job.kind == "FULFILL_ORDER"))
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].idempotency_key == f"fulfill:{order.id}"
+    assert rows[0].status is JobStatus.QUEUED
+
+
+async def test_gate_bounces_when_delivery_in_flight(session, session_factory) -> None:
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import DeliveryStatus
+    from vpnbot.security.crypto import CredentialCipher
+    from vpnbot.services import fulfillment
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services import wallet as wallet_service
+
+    cipher = CredentialCipher("MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=")
+    user = await make_user(session, telegram_id=900002311)
+    await wallet_service.credit(session, user_id=user.id, amount_irt=300_000, kind="TOPUP", key="g23")
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 1, "gate23")
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    await payment_service.pay_order_with_wallet(session, order=order, user_id=user.id)
+    order.delivery_status = DeliveryStatus.SENDING  # another execution is mid-delivery
+    await session.commit()
+
+    async def deliver(*args):  # noqa: ANN002, ANN202
+        raise AssertionError("must not deliver while another delivery is in flight")
+
+    result = await fulfillment.fulfill_order(
+        session_factory, order_id=order.id, cipher=cipher, deliver=deliver
+    )
+    assert result.outcome is fulfillment.FulfillOutcome.RETRY
