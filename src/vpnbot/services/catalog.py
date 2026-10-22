@@ -45,6 +45,10 @@ async def list_products(
             ]
         )
     if category_id is not None:
+        from vpnbot.db.base import sane_id
+
+        if not sane_id(category_id):
+            return [], 0
         conditions.append(Product.category_id == category_id)
     base = select(Product).where(*conditions)
     if active_only:

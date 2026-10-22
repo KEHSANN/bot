@@ -76,6 +76,12 @@ class RateLimiter:
             if self._allowance < 1:
                 await asyncio.sleep((1 - self._allowance) / self.rate)
                 self._allowance = 0.0
+                # Restart the clock AFTER the sleep: _last still held
+                # the pre-sleep timestamp, so the next acquirer
+                # counted the sleep itself as elapsed refill and got
+                # a free token — the limiter ran at ~2x its rate
+                # (40 msg/s at the 20/s setting, over Telegram's cap).
+                self._last = time.monotonic()
             else:
                 self._allowance -= 1
 

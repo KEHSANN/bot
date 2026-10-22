@@ -103,11 +103,19 @@ class BlockedUserMiddleware(BaseMiddleware):
     Two exceptions:
 
     * ``/start`` still goes through, so the customer sees the blocked
-      screen (and, after an unblock, the normal menu again);
+      screen (and, after an unblock, the normal menu again) — but at
+      most once per NOTICE_INTERVAL: /start spam from a script would
+      otherwise burn the bot's Telegram send quota and grow the
+      dispatch log at the throttle's full 90 messages/minute;
     * admins are never gated — an admin whose personal user row is
       blocked keeps full panel access (blocking an admin's user row is
       refused in the service layer anyway).
     """
+
+    NOTICE_INTERVAL_SECONDS = 300.0
+
+    def __init__(self) -> None:
+        self._notified_at: dict[int, float] = {}
 
     async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
         if not isinstance(event, (Message, CallbackQuery)):
@@ -118,6 +126,18 @@ class BlockedUserMiddleware(BaseMiddleware):
         if user is None or not getattr(user, "is_blocked", False):
             return await handler(event, data)
         if isinstance(event, Message) and (event.text or "").startswith("/start"):
+            import time as _time
+
+            telegram_id = getattr(user, "telegram_id", None)
+            if telegram_id is None:
+                return await handler(event, data)
+            now = _time.monotonic()
+            last = self._notified_at.get(telegram_id, 0.0)
+            if now - last < self.NOTICE_INTERVAL_SECONDS:
+                return None  # already told recently; drop silently
+            if len(self._notified_at) > 10_000:
+                self._notified_at.clear()
+            self._notified_at[telegram_id] = now
             return await handler(event, data)
         if isinstance(event, CallbackQuery):
             with contextlib.suppress(Exception):

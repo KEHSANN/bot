@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     @field_validator("bot_token")
     @classmethod
     def _bot_token_shape(cls, value: str) -> str:
-        if ":" not in value or not value.split(":", 1)[0].isdigit():
+        if ":" not in value or not value.split(":", 1)[0].isdecimal():
             raise ValueError("BOT_TOKEN must look like '<digits>:<secret>'")
         return value
 

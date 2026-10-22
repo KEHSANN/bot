@@ -172,6 +172,7 @@ async def expire_stale_orders(session: AsyncSession) -> int:
 
     from vpnbot.db.base import utcnow
     from vpnbot.db.enums import PaymentStatus
+    from vpnbot.db.models.orders import Payment
     from vpnbot.services.settings import SHOP_SETTINGS, SettingsService
 
     config = await SettingsService(session).get(SHOP_SETTINGS)
@@ -183,16 +184,35 @@ async def expire_stale_orders(session: AsyncSession) -> int:
     # kill the worker's expiry loop. (Settings input is capped too.)
     ttl_hours = min(ttl_hours, 1_000_000)
     cutoff = utcnow() - timedelta(hours=ttl_hours)
-    orders = (
+    # IDs only from the unlocked scan: deciding on cached rows here
+    # was a TOCTOU — a wallet payment landing concurrently approved
+    # the payment and debited the wallet, after which this sweep
+    # overwrote the status with EXPIRED from its stale copy and
+    # cancelled the order; cancel_order then read the (already
+    # overwritten) status, skipped the wallet refund, and the money
+    # was gone with no delivery. Each order is re-read under lock.
+    candidate_ids = (
         await session.execute(
-            select(Order)
-            .options(selectinload(Order.payment))
-            .where(Order.status == OrderStatus.PENDING_PAYMENT, Order.created_at < cutoff)
+            select(Order.id).where(
+                Order.status == OrderStatus.PENDING_PAYMENT, Order.created_at < cutoff
+            )
         )
     ).scalars()
     cancelled = 0
-    for order in orders:
-        payment = order.payment
+    for order_id in candidate_ids:
+        order = await get_order(session, order_id, for_update=True)
+        if order is None or order.status is not OrderStatus.PENDING_PAYMENT:
+            continue
+        payment = None
+        if order.payment is not None:
+            payment = (
+                await session.execute(
+                    select(Payment)
+                    .where(Payment.id == order.payment.id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
         if payment is not None and payment.status not in (
             PaymentStatus.AWAITING_PAYMENT_DETAILS,
             PaymentStatus.REJECTED,
@@ -248,10 +268,36 @@ async def cancel_preview_orders(
     return count
 
 
-async def cancel_order(session: AsyncSession, order_id: int, *, reason: str | None = None) -> Order:
+async def cancel_order(
+    session: AsyncSession, order_id: int, *, reason: str | None = None, by_customer: bool = False
+) -> Order:
     order = await get_order(session, order_id, for_update=True)
     if order is None:
         raise OrderError("سفارش یافت نشد")
+    if by_customer:
+        # Service-level backstop for the customer cancel paths (the
+        # handlers check too, but a state race must not let a customer
+        # cancel out from under an admin's review or a completed
+        # payment): under-review and approved payments are the
+        # admin's decision, not the customer's.
+        from vpnbot.db.enums import PaymentStatus as _PS
+        from vpnbot.db.models.orders import Payment as _Payment
+
+        locked_payment = None
+        if order.payment is not None:
+            locked_payment = (
+                await session.execute(
+                    select(_Payment)
+                    .where(_Payment.id == order.payment.id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+        if locked_payment is not None and locked_payment.status in (
+            _PS.PENDING_REVIEW,
+            _PS.APPROVED,
+        ):
+            raise OrderError("پرداخت این سفارش در حال بررسی یا تأیید شده و قابل لغو نیست")
     if order.status in (OrderStatus.FULFILLED, OrderStatus.REFUNDED):
         raise OrderError("سفارش تحویل‌شده قابل لغو نیست")
     if order.delivery_status is DeliveryStatus.SENDING:

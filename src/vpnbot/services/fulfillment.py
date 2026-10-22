@@ -161,20 +161,11 @@ async def _reserve_and_gate(
                 select(Payment).where(Payment.order_id == order_id).with_for_update()
             )
         ).scalar_one_or_none()
-        if payment is None or payment.status is not PaymentStatus.APPROVED:
-            await audit_service.record(
-                session,
-                actor_type=AuditActor.SYSTEM,
-                actor_id=None,
-                action="fulfillment.blocked_unapproved_payment",
-                entity_type="order",
-                entity_id=order_id,
-                data={"payment_status": payment.status.value if payment else None},
-            )
-            raise PaymentGateError(
-                f"order {order_id}: payment is not APPROVED; delivery refused"
-            )
 
+        # Terminal order states FIRST: a paid order an admin cancelled
+        # has payment CANCELLED too, so checking the payment first
+        # turned it into a PaymentGateError and the worker burned all
+        # 8 job attempts instead of finishing as SKIPPED once.
         if order.status is OrderStatus.FULFILLED:
             return FulfillResult(FulfillOutcome.ALREADY, order_id)
 
@@ -189,6 +180,27 @@ async def _reserve_and_gate(
                 data={"order_status": order.status.value},
             )
             return FulfillResult(FulfillOutcome.SKIPPED, order_id, order.status.value)
+
+        if payment is None or payment.status is not PaymentStatus.APPROVED:
+            payment_status = payment.status.value if payment else None
+            # The audit must OUTLIVE the refusal: recording it in this
+            # transaction and then raising rolled it back with
+            # everything else, so the security log of a blocked
+            # delivery never existed. Write it on its own committed
+            # transaction, then raise.
+            async with session_factory() as audit_session, audit_session.begin():
+                await audit_service.record(
+                    audit_session,
+                    actor_type=AuditActor.SYSTEM,
+                    actor_id=None,
+                    action="fulfillment.blocked_unapproved_payment",
+                    entity_type="order",
+                    entity_id=order_id,
+                    data={"payment_status": payment_status},
+                )
+            raise PaymentGateError(
+                f"order {order_id}: payment is not APPROVED; delivery refused"
+            )
 
         try:
             # Idempotent: returns the pair already bound to this order, if any.
