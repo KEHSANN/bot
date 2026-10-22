@@ -188,6 +188,11 @@ async def expire_stale_orders(session: AsyncSession) -> int:
         if payment is not None and payment.status not in (
             PaymentStatus.AWAITING_PAYMENT_DETAILS,
             PaymentStatus.REJECTED,
+            # A CANCELLED payment is terminal (e.g. the user was
+            # blocked and unblocked before this fix cancelled the
+            # orders too): the order can never be paid, so it expires
+            # here instead of stranding the customer at the cap.
+            PaymentStatus.CANCELLED,
         ):
             continue
         if payment is not None and payment.status is PaymentStatus.AWAITING_PAYMENT_DETAILS:

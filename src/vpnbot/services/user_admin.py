@@ -20,7 +20,7 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from vpnbot.db.enums import AuditActor, PaymentStatus, UserStatus
+from vpnbot.db.enums import AuditActor, OrderStatus, PaymentStatus, UserStatus
 from vpnbot.db.models.orders import Order, Payment
 from vpnbot.db.models.users import Admin, User
 from vpnbot.db.models.wallet import WalletTopUp
@@ -51,6 +51,7 @@ async def block_user(session: AsyncSession, *, user_id: int, admin_id: int) -> d
     receipts_cleared = 0
     wiped_file_ids: list[str] = []
     payments_cancelled = 0
+    orders_cancelled = 0
     payments = (
         await session.execute(
             select(Payment).join(Order, Order.id == Payment.order_id).where(Order.user_id == user_id)
@@ -66,6 +67,17 @@ async def block_user(session: AsyncSession, *, user_id: int, admin_id: int) -> d
             payment.status = PaymentStatus.CANCELLED
             payment.txid = None
             payments_cancelled += 1
+            # The ORDER must die with its payment: leaving it
+            # PENDING_PAYMENT stranded it forever — after unblock the
+            # customer faced three zombie orders, an unbreakable
+            # open-order cap, a TTL sweep that skipped
+            # CANCELLED-payment orders, and a cancel button that
+            # refused them as "under review".
+            order = await session.get(Order, payment.order_id)
+            if order is not None and order.status is OrderStatus.PENDING_PAYMENT:
+                order.status = OrderStatus.CANCELLED
+                order.notes = "لغو به‌دلیل مسدود شدن کاربر"
+                orders_cancelled += 1
 
     topups_cancelled = 0
     topups = (
@@ -85,6 +97,7 @@ async def block_user(session: AsyncSession, *, user_id: int, admin_id: int) -> d
     result = {
         "receipts_cleared": receipts_cleared,
         "payments_cancelled": payments_cancelled,
+        "orders_cancelled": orders_cancelled,
         "topups_cancelled": topups_cancelled,
     }
     await audit_service.record(

@@ -107,7 +107,11 @@ def parse_records(
 
     # CSV with header detection
     stripped = [line for line in lines if line.strip() and not line.lstrip().startswith("#")]
-    if stripped and "," in stripped[0] and _looks_like_csv_header(stripped[0]):
+    if stripped and _looks_like_csv_header(stripped[0]) and (
+        "," in stripped[0] or stripped[0].strip().lower() in set().union(*_CSV_HEADERS.values())
+    ):
+        # A header row marks CSV even with a single column (a
+        # sub_url-only file has no comma to give it away).
         reader = csv.reader(io.StringIO("\n".join(stripped)))
         rows = list(reader)
         header = [h.strip().lower() for h in rows[0]]
@@ -118,6 +122,10 @@ def parse_records(
                 continue
             config = row[idx_config].strip() if idx_config is not None and idx_config < len(row) else ""
             sub = row[idx_sub].strip() if idx_sub is not None and idx_sub < len(row) else ""
+            if subscription_links and not config and sub:
+                # Same rule as bare-line imports for subscription
+                # products: a sub-only CSV row is a complete record.
+                config = sub
             records.append(_record(offset, config, sub, allow_config_only))
         return records
 
