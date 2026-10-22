@@ -2373,3 +2373,34 @@ async def test_send_config_pair_rendering_contract() -> None:
     await send_config_pair(bot, 42, "vless://cfg", "https://example.com/sub/xyz", "کانفیگ", "R2")
     assert calls[0]["parse_mode"] == "HTML"
     assert calls[0]["disable_web_page_preview"] is True
+
+
+async def test_topup_submit_after_expiry_refused(session) -> None:
+    from datetime import timedelta
+
+    from tests.factories import make_user
+
+    from vpnbot.db.base import utcnow
+    from vpnbot.services import topups as topup_service
+    from vpnbot.services.settings import CARD_SETTINGS, SettingsService
+
+    user = await make_user(session, telegram_id=900001701)
+    await SettingsService(session).set(
+        CARD_SETTINGS,
+        {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
+    )
+    from vpnbot.db.enums import PaymentMethod
+
+    topup = await topup_service.create_topup(
+        session, user_id=user.id, amount_irt=50_000, method=PaymentMethod.CARD
+    )
+    topup.expires_at = utcnow() - timedelta(minutes=1)  # sweeper hasn't run yet
+    await session.flush()
+    try:
+        await topup_service.submit_card_receipt(
+            session, topup_id=topup.id, user_id=user.id, file_id="f", file_type="PHOTO"
+        )
+    except topup_service.TopUpError:
+        pass
+    else:
+        raise AssertionError("receipt onto an expired top-up must be refused")

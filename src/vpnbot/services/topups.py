@@ -127,6 +127,11 @@ async def _topup_for_user(session: AsyncSession, topup_id: int, user_id: int) ->
 def _require_submittable(topup: WalletTopUp) -> None:
     if topup.status not in (PaymentStatus.AWAITING_PAYMENT_DETAILS, PaymentStatus.REJECTED):
         raise TopUpError("امکان ارسال مجدد رسید در این وضعیت وجود ندارد")
+    if topup.expires_at is not None and topup.expires_at < utcnow():
+        # Same guard as order payments (_require_order_payable):
+        # without it, a receipt could land on an expired top-up in
+        # the window before the sweeper marks it EXPIRED.
+        raise TopUpError("مهلت ارسال رسید این درخواست شارژ تمام شده است")
 
 
 async def submit_card_receipt(
