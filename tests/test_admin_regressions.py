@@ -2467,3 +2467,140 @@ async def test_forged_huge_ids_are_not_found(session) -> None:
     assert await catalog_service.get_plan(session, huge) is None
     assert await order_service.get_order(session, huge) is None
     assert await order_service.get_order(session, -5) is None
+
+
+# --- Round 19: expire TOCTOU, gate audit/order, ids, limiter, blocked ---
+
+
+async def test_expire_never_overwrites_wallet_payment(session) -> None:
+    """The sweep re-reads under lock: a wallet-paid order (payment
+    APPROVED) is not a TTL candidate even when aged, and the wallet
+    is never debited-then-vanished by an expiry overwrite."""
+    from datetime import timedelta
+
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.base import utcnow
+    from vpnbot.db.enums import OrderStatus
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services import wallet as wallet_service
+    from vpnbot.services.settings import SHOP_SETTINGS, SettingsService
+
+    user = await make_user(session, telegram_id=900001901)
+    await wallet_service.credit(session, user_id=user.id, amount_irt=300_000, kind="TOPUP", key="t19")
+    await SettingsService(session).set(SHOP_SETTINGS, {"order_ttl_hours": 1})
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 1, "toctou")
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    order.created_at = utcnow() - timedelta(hours=3)
+    await session.flush()
+    await payment_service.pay_order_with_wallet(session, order=order, user_id=user.id)
+    assert await order_service.expire_stale_orders(session) == 0
+    await session.refresh(order)
+    assert order.status is OrderStatus.FULFILLMENT_PENDING
+
+
+async def test_cancel_by_customer_refuses_under_review(session) -> None:
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import PaymentMethod
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services.settings import CARD_SETTINGS, SettingsService
+
+    user = await make_user(session, telegram_id=900001911)
+    await SettingsService(session).set(
+        CARD_SETTINGS,
+        {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
+    )
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 1, "bycust")
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    payment = await payment_service.start_payment(session, order=order, method=PaymentMethod.CARD)
+    await payment_service.submit_card_receipt(
+        session, payment_id=payment.id, user_id=user.id, file_id="f", file_type="PHOTO"
+    )
+    try:
+        await order_service.cancel_order(session, order.id, reason="x", by_customer=True)
+    except order_service.OrderError:
+        pass
+    else:
+        raise AssertionError("customer cancel must refuse a payment under review")
+    # The admin path (by_customer=False) still can.
+    await order_service.cancel_order(session, order.id, reason="x")
+
+
+async def test_rate_limiter_real_rate() -> None:
+    import time
+
+    from vpnbot.jobs.worker import RateLimiter
+
+    limiter = RateLimiter(5)
+    for _ in range(5):
+        await limiter.acquire()  # burst allowance
+    start = time.monotonic()
+    for _ in range(5):
+        await limiter.acquire()
+    elapsed = time.monotonic() - start
+    assert elapsed >= 0.9, f"limiter ran hot: {elapsed:.2f}s for 5 tokens at 5/s"
+
+
+async def test_gate_audit_survives_and_cancelled_skips(session, session_factory) -> None:
+    from sqlalchemy import select
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.models.system import AuditEvent
+    from vpnbot.security.crypto import CredentialCipher
+    from vpnbot.services import fulfillment
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services import wallet as wallet_service
+
+    cipher = CredentialCipher("MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=")
+    user = await make_user(session, telegram_id=900001921)
+    await wallet_service.credit(session, user_id=user.id, amount_irt=300_000, kind="TOPUP", key="t19b")
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 1, "gate")
+
+    sent: list = []
+
+    async def deliver(*args):  # noqa: ANN002, ANN202
+        sent.append(args)
+
+    # Unpaid order: the gate refuses AND the audit row persists.
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    await session.commit()
+    try:
+        await fulfillment.fulfill_order(
+            session_factory, order_id=order.id, cipher=cipher, deliver=deliver
+        )
+    except fulfillment.PaymentGateError:
+        pass
+    else:
+        raise AssertionError("unpaid order must hit the gate")
+    async with session_factory() as check:
+        rows = (
+            await check.execute(
+                select(AuditEvent).where(AuditEvent.action == "fulfillment.blocked_unapproved_payment")
+            )
+        ).scalars()
+        assert len(list(rows)) == 1  # committed, not rolled back with the raise
+
+    # Paid then admin-cancelled: the job resolves SKIPPED, not an error.
+    order2 = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    await payment_service.pay_order_with_wallet(session, order=order2, user_id=user.id)
+    await order_service.cancel_order(session, order2.id, reason="admin")
+    await session.commit()
+    result = await fulfillment.fulfill_order(
+        session_factory, order_id=order2.id, cipher=cipher, deliver=deliver
+    )
+    assert result.outcome is fulfillment.FulfillOutcome.SKIPPED
