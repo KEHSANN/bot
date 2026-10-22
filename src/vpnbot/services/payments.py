@@ -59,6 +59,9 @@ def _review_ttl() -> timedelta:
 async def start_payment(
     session: AsyncSession, *, order: Order, method: PaymentMethod
 ) -> Payment:
+    if order.status is not OrderStatus.PENDING_PAYMENT:
+        # A stale checkout state must not revive a closed order.
+        raise PaymentError("این سفارش دیگر قابل پرداخت نیست")
     settings = SettingsService(session)
     key = CARD_SETTINGS if method is PaymentMethod.CARD else CRYPTO_SETTINGS
     details = await settings.get(key)
@@ -83,6 +86,10 @@ async def start_payment(
             # Never reset a payment under review: the customer already sent
             # evidence and an admin may be looking at it right now.
             raise PaymentError("این سفارش در حال بررسی یا تأیید است")
+        if payment.status in (PaymentStatus.CANCELLED, PaymentStatus.EXPIRED):
+            # Terminal states: resurrecting one would reopen a
+            # payment whose order was closed around it.
+            raise PaymentError("این سفارش بسته شده است؛ سفارش جدید بسازید")
         payment.method = method
         payment.status = PaymentStatus.AWAITING_PAYMENT_DETAILS
         payment.submitted_at = None
@@ -237,10 +244,24 @@ async def txid_taken(
 
 
 async def _payment_for_user(session: AsyncSession, payment_id: int, user_id: int) -> Payment:
+    # Lock ORDER first, then PAYMENT — the order every other writer
+    # (approve, wallet pay, cancel) uses. The submit paths used to
+    # mutate the payment from an unlocked read: a receipt landing
+    # concurrently with a wallet payment could flip an APPROVED
+    # payment back to PENDING_REVIEW, leaving a debited wallet, a
+    # queued fulfilment job, and a gate that refuses delivery.
+    from vpnbot.db.base import sane_id
+
+    if not sane_id(payment_id):
+        raise PaymentError("پرداخت یافت نشد")
+    order_id = (
+        await session.execute(select(Payment.order_id).where(Payment.id == payment_id))
+    ).scalar_one_or_none()
+    if order_id is None:
+        raise PaymentError("پرداخت یافت نشد")
+    await session.execute(select(Order).where(Order.id == order_id).with_for_update())
     payment = (
-        await session.execute(
-            select(Payment).join(Order, Order.id == Payment.order_id).where(Payment.id == payment_id)
-        )
+        await session.execute(select(Payment).where(Payment.id == payment_id).with_for_update())
     ).scalar_one_or_none()
     if payment is None:
         raise PaymentError("پرداخت یافت نشد")
@@ -543,19 +564,34 @@ async def expire_stale_payments(session: AsyncSession) -> int:
     its TXID.
     """
     now = utcnow()
-    rows = (
+    # Candidates first (unlocked), then lock ORDER before PAYMENT for
+    # each — the global lock order. This function used to lock the
+    # payment rows first and only then touch the orders, the exact
+    # opposite of approve/pay/cancel, which deadlocks under load.
+    candidate_ids = (
         await session.execute(
-            select(Payment)
-            .where(
+            select(Payment.id, Payment.order_id).where(
                 Payment.status == PaymentStatus.AWAITING_PAYMENT_DETAILS,
                 Payment.expires_at.is_not(None),
                 Payment.expires_at < now,
             )
-            .with_for_update(skip_locked=True)
         )
-    ).scalars()
+    ).all()
     count = 0
-    for payment in rows:
+    for payment_id, order_id in candidate_ids:
+        await session.execute(select(Order).where(Order.id == order_id).with_for_update())
+        payment = (
+            await session.execute(
+                select(Payment).where(Payment.id == payment_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if (
+            payment is None
+            or payment.status is not PaymentStatus.AWAITING_PAYMENT_DETAILS
+            or payment.expires_at is None
+            or payment.expires_at >= now
+        ):
+            continue  # changed under us (submitted / approved meanwhile)
         payment.status = PaymentStatus.EXPIRED
         payment.txid = None
         order = await session.get(Order, payment.order_id)

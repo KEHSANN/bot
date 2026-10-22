@@ -118,7 +118,15 @@ async def create_topup(
 
 
 async def _topup_for_user(session: AsyncSession, topup_id: int, user_id: int) -> WalletTopUp:
-    topup = await session.get(WalletTopUp, topup_id)
+    from vpnbot.db.base import sane_id
+
+    if not sane_id(topup_id):
+        raise TopUpError("درخواست شارژ یافت نشد")
+    topup = (
+        await session.execute(
+            select(WalletTopUp).where(WalletTopUp.id == topup_id).with_for_update()
+        )
+    ).scalar_one_or_none()
     if topup is None or topup.user_id != user_id:
         raise TopUpError("درخواست شارژ یافت نشد")
     return topup
