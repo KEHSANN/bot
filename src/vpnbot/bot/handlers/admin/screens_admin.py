@@ -559,7 +559,7 @@ async def screens_router(
         await common.reply(
             callback,
             f"<b>⏱ تأخیر پیام {position + 1}</b>\n\n"
-            "تأخیر قبل از ارسال را به میلی‌ثانیه بفرستید (۰ تا ۱۰۰۰۰).",
+            "تأخیر قبل از ارسال را به میلی‌ثانیه بفرستید (۰ تا ۳۰۰۰).",
             [common.cancel_row()],
         )
         return
@@ -762,7 +762,7 @@ async def message_input(
         if field == "delay":
             value = raw.strip()
             if not value.isdigit() or int(value) > 3_000:
-                raise screen_service.TemplateError("تأخیر باید عددی بین ۰ تا ۱۰۰۰۰ باشد")
+                raise screen_service.TemplateError("تأخیر باید عددی بین ۰ تا ۳۰۰۰ باشد")
             if not 0 <= position < len(messages):
                 raise screen_service.TemplateError("پیام یافت نشد")
             messages[position]["delay_ms"] = int(value)

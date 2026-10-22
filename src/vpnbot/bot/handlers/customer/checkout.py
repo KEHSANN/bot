@@ -13,7 +13,7 @@ import logging
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from vpnbot.bot.handlers.customer.common import alert, base_context, money, sender_for
@@ -83,6 +83,10 @@ async def _resolve_order(
             and order.status is OrderStatus.PENDING_PAYMENT
             and order.plan_id == plan.id
             and order.total_irt == plan.price_irt
+            # Reuse skips create_order, which is where stock is
+            # normally checked: without this, a sold-out plan's open
+            # order stays payable until fulfilment bounces it.
+            and await catalog_service.stock_for_plan(session, product.id, plan.id) > 0
         ):
             # The price check matters: without it, reusing an open
             # order after an admin price change would sell at the
@@ -359,6 +363,13 @@ async def resume_checkout(
     if plan is None or not plan.is_on_sale:
         await alert(callback, "این پلن دیگر در دسترس نیست")
         return
+    product = await catalog_service.get_product(session, plan.product_id)
+    if product is None or not product.is_on_sale:
+        await alert(callback, "این محصول دیگر در دسترس نیست")
+        return
+    if await catalog_service.stock_for_plan(session, product.id, plan.id) <= 0:
+        await alert(callback, "موجودی این محصول به پایان رسیده است")
+        return
     if plan.price_irt != order.total_irt:
         # The checkout screen would show the order's snapshot price
         # while the flow underneath charges the plan's current one.
@@ -371,6 +382,13 @@ async def resume_checkout(
     await state.clear()
     await state.update_data(order_id=order.id, plan_id=order.plan_id, order_ref=order.public_id)
     await callback.answer()
+    # The wallet option is code-side (not part of the editable
+    # checkout screen), passed as an extra row on the SAME message —
+    # a separate follow-up message used to linger in the chat after
+    # the customer navigated away or cancelled.
+    from vpnbot.bot.handlers.customer.shop import _wallet_buy_row
+
+    wallet_row = await _wallet_buy_row(session, user, plan.id)
     await sender_for(callback.bot, session).show(
         callback,
         STAGE_CHECKOUT,
@@ -380,19 +398,8 @@ async def resume_checkout(
             plan_title=order.plan_title_snapshot or order.product_title_snapshot,
             price=money(order.total_irt),
         ),
+        extra_rows=[wallet_row] if wallet_row is not None else [],
     )
-    # The resume screen is screen-driven (card/crypto buttons); the
-    # wallet option is code-side, so offer it as a follow-up message
-    # bound to this plan (the ask flow reuses this very order).
-    from vpnbot.bot.handlers.customer.shop import _wallet_buy_row
-
-    wallet_row = await _wallet_buy_row(session, user, plan.id)
-    message = callback.message
-    if wallet_row is not None and isinstance(message, Message):
-        await message.answer(
-            "یا همین سفارش را با کیف پول پرداخت کنید:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[wallet_row]),
-        )
 
 
 @router.callback_query(MenuCB.filter(F.action == "paycrypto"))

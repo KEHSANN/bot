@@ -329,6 +329,29 @@ async def send_config_pair(
     """
     import html as _html
 
+    # Subscription stock stores the link in BOTH slots (that is what
+    # a subscription product is); sending it twice — once as "config"
+    # and once as "subscription link" — is a duplicate, so collapse
+    # it to a single link block.
+    if sub_url and sub_url == config:
+        lines = [
+            "🎉 <b>سفارش شما تأیید شد</b>",
+            "",
+            f"محصول: {_html.escape(product_title)}",
+            f"کد سفارش: <code>{_html.escape(order_ref)}</code>",
+            "",
+            "<b>لینک اشتراک:</b>",
+            _html.escape(sub_url),
+        ]
+        lines.extend(
+            [
+                "",
+                "این لینک را در برنامه VPN خود وارد کنید.",
+                "⚠️ این لینک شخصی است؛ آن را با دیگران به اشتراک نگذارید.",
+            ]
+        )
+        await bot.send_message(chat_id, "\n".join(lines))
+        return
     lines = [
         "🎉 <b>سفارش شما تأیید شد</b>",
         "",

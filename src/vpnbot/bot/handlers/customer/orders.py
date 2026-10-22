@@ -177,6 +177,24 @@ async def order_detail(
                 )
             ]
         )
+    if (
+        order.status is OrderStatus.PENDING_PAYMENT
+        and payment is not None
+        and payment.status is PaymentStatus.CANCELLED
+    ):
+        # Dead order (its payment was cancelled, e.g. by a block): no
+        # way to pay it, but the customer can clear it from the cap.
+        from vpnbot.bot.keyboards.callbacks import OrderCancelCB
+
+        extra_rows.append(
+            [
+                InlineKeyboardButton(
+                    text="❌ لغو سفارش",
+                    callback_data=OrderCancelCB(order_id=order.id).pack(),
+                    style="danger",
+                )
+            ]
+        )
     if order.status is OrderStatus.FULFILLED:
         extra_rows.append(
             [
@@ -219,6 +237,7 @@ async def cancel_own_order(
     if payment is not None and payment.status not in (
         PaymentStatus.AWAITING_PAYMENT_DETAILS,
         PaymentStatus.REJECTED,
+        PaymentStatus.CANCELLED,
     ):
         await alert(callback, "پرداخت این سفارش در حال بررسی است و قابل لغو نیست")
         return
