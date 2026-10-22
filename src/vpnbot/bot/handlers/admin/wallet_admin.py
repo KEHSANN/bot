@@ -43,7 +43,10 @@ DIRECTIONS = {"in": "افزایش", "out": "کاهش"}
 
 async def _find_user(session: AsyncSession, raw: str) -> User | None:
     text = raw.strip().lstrip("@")
-    if text.isdigit():
+    # isdecimal, not isdigit: "²".isdigit() is True but int("²")
+    # raises. And bound the value: telegram_id is a BIGINT column,
+    # so a 20-digit "id" overflowed asyncpg with a raw DataError.
+    if text.isdecimal() and 0 < int(text) < 2**63:
         return (
             await session.execute(select(User).where(User.telegram_id == int(text)))
         ).scalar_one_or_none()

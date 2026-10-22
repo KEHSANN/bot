@@ -242,7 +242,7 @@ async def cancel_own_order(
         await alert(callback, "پرداخت این سفارش در حال بررسی است و قابل لغو نیست")
         return
     try:
-        await order_service.cancel_order(session, order.id, reason="لغو توسط مشتری")
+        await order_service.cancel_order(session, order.id, reason="لغو توسط مشتری", by_customer=True)
     except order_service.OrderError as exc:
         await alert(callback, f"⚠️ {exc}")
         return

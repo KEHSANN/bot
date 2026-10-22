@@ -257,7 +257,7 @@ async def value_input(
         if kind == "money":
             value = parse_amount_irt(raw)
         elif kind == "count":
-            if not raw.isdigit() or int(raw) < 0 or int(raw) > 100_000:
+            if not raw.isdecimal() or int(raw) < 0 or int(raw) > 100_000:
                 # The cap matters: an unbounded count (e.g.
                 # order_ttl_hours) later feeds timedelta()/range
                 # arithmetic that overflows and kills worker loops.

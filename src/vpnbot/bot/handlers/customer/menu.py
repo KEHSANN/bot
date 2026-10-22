@@ -56,7 +56,7 @@ async def cancel_open_order_from_state(
 
     with contextlib.suppress(order_service.OrderError):
         # May race with fulfilment — then there is nothing to cancel.
-        await order_service.cancel_order(session, order.id, reason="لغو توسط مشتری")
+        await order_service.cancel_order(session, order.id, reason="لغو توسط مشتری", by_customer=True)
 
 #: Simple action -> screen mapping for actions with no dynamic content.
 STATIC_ACTIONS = {
@@ -98,11 +98,9 @@ async def cmd_start(
 
     sender: ScreenSender = sender_for(message.bot, session)
     if not user.is_active:
-        # Blocked users get the blocked screen and NOTHING else: the
-        # referral bind used to run before this check, so a blocked
-        # account could still attribute referrals (and lock the
-        # inviter's row) by spamming /start.
-        await sender.show(message, STAGE_BLOCKED)
+        # Blocked screen: no dispatch-log row per view (the middleware
+        # already rate-limits how often a blocked user reaches this).
+        await sender.show(message, STAGE_BLOCKED, log_outcome=False)
         return
 
     code = _referral_from_start(command.args)

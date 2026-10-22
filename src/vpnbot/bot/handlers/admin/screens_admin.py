@@ -761,7 +761,7 @@ async def message_input(
     try:
         if field == "delay":
             value = raw.strip()
-            if not value.isdigit() or int(value) > 3_000:
+            if not value.isdecimal() or int(value) > 3_000:
                 raise screen_service.TemplateError("تأخیر باید عددی بین ۰ تا ۳۰۰۰ باشد")
             if not 0 <= position < len(messages):
                 raise screen_service.TemplateError("پیام یافت نشد")
@@ -832,7 +832,7 @@ async def button_input(
                     "قالب درست: متن | مقصد | ردیف"
                 )
             text, target = parts[0], parts[1]
-            row = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+            row = int(parts[2]) if len(parts) > 2 and parts[2].isdecimal() else 0
             candidate: dict = {"text": text, "row": row, "style": "DEFAULT", "enabled": True}
             if target.startswith(("https://", "tg://")):
                 candidate["url"] = target
