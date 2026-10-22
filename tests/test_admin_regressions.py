@@ -2765,3 +2765,48 @@ async def test_support_thread_view_fits_telegram_limit(session, monkeypatch) -> 
     monkeypatch.setattr(support_admin.common, "reply", fake_reply)
     await support_admin._show_thread(object(), session, object(), ticket.id)
     assert len(captured["text"]) <= 4_096
+
+
+# --- Round 21: sends happen outside the handler transaction ---
+
+
+async def test_show_commits_before_sending(session, session_factory) -> None:
+    """A row written by the 'handler' phase must be visible to a
+    second session once show() runs: the send phase holds no open
+    transaction (no pooled connection, no row locks)."""
+    from types import SimpleNamespace
+
+    from sqlalchemy import select
+    from tests.factories import make_catalog
+
+    from vpnbot.bot.sender import ScreenSender
+    from vpnbot.db.models.users import User
+    from vpnbot.services.screens import ScreenService
+
+    _, product, _plan = await make_catalog(session)
+    product.title = "نشانه‌ی فاز اول"
+    await session.flush()  # written, NOT committed
+
+    sent: list = []
+
+    class FakeBot:
+        async def send_message(self, **kwargs):  # noqa: ANN202
+            sent.append(kwargs)
+            return SimpleNamespace(message_id=1)
+
+    sender = ScreenSender(FakeBot(), ScreenService(session))
+    target = SimpleNamespace(chat=SimpleNamespace(id=123))
+    await sender.show(target, "blocked", log_outcome=False)
+    assert sent  # the screen actually went out
+
+    async with session_factory() as other:
+        row = (
+            await other.execute(select(User).where(User.telegram_id == 123))
+        ).scalar_one_or_none()
+        assert row is None  # sanity: the probe session works
+        from vpnbot.db.models.catalog import Product
+
+        seen = (
+            await other.execute(select(Product.title).where(Product.id == product.id))
+        ).scalar_one()
+        assert seen == "نشانه‌ی فاز اول"  # committed before the send
