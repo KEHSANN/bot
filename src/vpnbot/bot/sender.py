@@ -350,7 +350,16 @@ async def send_config_pair(
                 "⚠️ این لینک شخصی است؛ آن را با دیگران به اشتراک نگذارید.",
             ]
         )
-        await bot.send_message(chat_id, "\n".join(lines))
+        # Same rendering contract as the normal path below: HTML
+        # parse mode AND no link preview. The preview is not cosmetic
+        # here — Telegram's crawler would fetch the subscription URL
+        # and register as a device on panels with device limits.
+        await bot.send_message(
+            chat_id=chat_id,
+            text="\n".join(lines),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
         return
     lines = [
         "🎉 <b>سفارش شما تأیید شد</b>",

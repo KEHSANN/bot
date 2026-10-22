@@ -2343,3 +2343,33 @@ async def test_subscription_csv_sub_only_rows(session) -> None:
     )
     assert len(records) == 2
     assert all(r.error is None and r.config == r.sub_url for r in records)
+
+
+async def test_send_config_pair_rendering_contract() -> None:
+    """Both delivery branches must send HTML with previews disabled.
+
+    Regression (round 16): the subscription collapse branch sent a
+    bare send_message — raw <b>/<code> tags for the customer, and
+    Telegram's preview crawler fetching the subscription URL (which
+    registers as a device on device-limited panels). The worker's
+    Bot also carried no DefaultBotProperties to catch it.
+    """
+    from vpnbot.bot.sender import send_config_pair
+
+    calls: list[dict] = []
+
+    class FakeBot:
+        async def send_message(self, chat_id=None, text=None, **kwargs):
+            calls.append({"chat_id": chat_id, "text": text, **kwargs})
+
+    bot = FakeBot()
+    await send_config_pair(bot, 42, "https://example.com/sub/xyz", "https://example.com/sub/xyz", "اشتراک", "R1")
+    assert len(calls) == 1
+    assert calls[0]["parse_mode"] == "HTML"
+    assert calls[0]["disable_web_page_preview"] is True
+    assert calls[0]["text"].count("https://example.com/sub/xyz") == 1  # sent once
+
+    calls.clear()
+    await send_config_pair(bot, 42, "vless://cfg", "https://example.com/sub/xyz", "کانفیگ", "R2")
+    assert calls[0]["parse_mode"] == "HTML"
+    assert calls[0]["disable_web_page_preview"] is True

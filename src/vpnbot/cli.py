@@ -187,12 +187,18 @@ async def cmd_run(_: argparse.Namespace) -> int:
 async def cmd_worker(_: argparse.Namespace) -> int:
     from aiogram import Bot
 
+    from vpnbot.bot.app import bot_properties
     from vpnbot.db.session import get_session_factory
     from vpnbot.jobs import Worker
 
     settings = get_settings()
     factory = get_session_factory()
-    bot = Bot(settings.bot_token)
+    # Same defaults as the polling bot (HTML parse mode, link
+    # previews disabled): the worker sends delivery and notification
+    # messages too, and a bare Bot made subscription deliveries leak
+    # raw tags — and let Telegram's preview crawler fetch (and
+    # register on) customers' subscription links.
+    bot = Bot(settings.bot_token, default=bot_properties())
     worker = Worker(bot=bot, session_factory=factory, settings=settings)
 
     loop = asyncio.get_running_loop()
