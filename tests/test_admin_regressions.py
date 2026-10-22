@@ -2759,7 +2759,7 @@ async def test_support_thread_view_fits_telegram_limit(session, monkeypatch) -> 
 
     captured: dict = {}
 
-    async def fake_reply(target, text, rows=None):  # noqa: ANN001, ANN202
+    async def fake_reply(target, text, rows=None, **kwargs):  # noqa: ANN001, ANN202
         captured["text"] = text
 
     monkeypatch.setattr(support_admin.common, "reply", fake_reply)
@@ -2832,7 +2832,7 @@ async def test_thread_truncation_never_splits_an_entity(session, monkeypatch) ->
 
     captured: dict = {}
 
-    async def fake_reply(target, text, rows=None):  # noqa: ANN001, ANN202
+    async def fake_reply(target, text, rows=None, **kwargs):  # noqa: ANN001, ANN202
         captured["text"] = text
 
     monkeypatch.setattr(support_admin.common, "reply", fake_reply)
@@ -2967,3 +2967,78 @@ async def test_gate_bounces_when_delivery_in_flight(session, session_factory) ->
         session_factory, order_id=order.id, cipher=cipher, deliver=deliver
     )
     assert result.outcome is fulfillment.FulfillOutcome.RETRY
+
+
+# --- Round 24: receipt spoof, cancel keeps approved TXID, msg limit ---
+
+
+def test_receipt_file_extension_crosscheck() -> None:
+    from types import SimpleNamespace
+
+    from vpnbot.bot.handlers.customer.common import receipt_file
+
+    def doc(mime, name, size=100):  # noqa: ANN001, ANN202
+        return SimpleNamespace(
+            photo=None,
+            document=SimpleNamespace(file_id="d", mime_type=mime, file_name=name, file_size=size),
+        )
+
+    # A modified client can label anything application/pdf — the
+    # extension must agree with the allowlist too.
+    assert receipt_file(doc("application/pdf", "evil.apk")) is None
+    assert receipt_file(doc("application/pdf", "page.html")) is None
+    assert receipt_file(doc("application/pdf", "receipt.pdf")) == ("d", "document")
+    assert receipt_file(doc("image/jpeg", "scan.JPG")) == ("d", "document")
+    assert receipt_file(doc("application/pdf", None)) == ("d", "document")
+
+
+async def test_cancel_keeps_approved_txid(session) -> None:
+    from tests.factories import make_catalog, make_user
+
+    from vpnbot.db.enums import PaymentMethod, PaymentStatus
+    from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services.auth import bootstrap_owner
+    from vpnbot.services.settings import CRYPTO_SETTINGS, SettingsService
+
+    admin = await bootstrap_owner(session, telegram_id=900002401)
+    user = await make_user(session, telegram_id=900002402)
+    await SettingsService(session).set(
+        CRYPTO_SETTINGS, {"enabled": True, "address": "TXYZ", "network": "TRC20"}
+    )
+    _, product, plan = await make_catalog(session)
+    await _stock(session, product, plan, 1, "txkeep")
+    order = await order_service.create_order(
+        session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
+    )
+    payment = await payment_service.start_payment(session, order=order, method=PaymentMethod.CRYPTO)
+    txid = "cd" * 32
+    await payment_service.submit_crypto_evidence(
+        session, payment_id=payment.id, user_id=user.id, txid=txid
+    )
+    await payment_service.approve_payment(session, payment_id=payment.id, admin_id=admin.id)
+    await order_service.cancel_order(session, order.id, reason="admin cancel after approval")
+    await session.refresh(payment)
+    assert payment.status is PaymentStatus.CANCELLED
+    # The verified transfer stays bound: the same hash must not fund
+    # a second order after this one was cancelled/refunded.
+    assert payment.txid == txid
+
+
+async def test_ticket_messages_limit_and_count(session) -> None:
+    from tests.factories import make_user
+
+    from vpnbot.db.enums import TicketSender
+    from vpnbot.services import support as support_service
+
+    user = await make_user(session, telegram_id=900002411)
+    ticket = await support_service.create_ticket(session, user=user, text="پیام اول")
+    for i in range(6):
+        await support_service.add_message(
+            session, ticket=ticket, text=f"پیام شماره {i}",
+            sender_type=TicketSender.CUSTOMER, sender_id=user.id,
+        )
+    await session.commit()
+    latest = await support_service.ticket_messages(session, ticket.id, limit=3)
+    assert [m.text for m in latest] == ["پیام شماره 3", "پیام شماره 4", "پیام شماره 5"]
+    assert await support_service.ticket_message_count(session, ticket.id) == 7
