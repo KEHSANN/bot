@@ -2810,3 +2810,58 @@ async def test_show_commits_before_sending(session, session_factory) -> None:
             await other.execute(select(Product.title).where(Product.id == product.id))
         ).scalar_one()
         assert seen == "نشانه‌ی فاز اول"  # committed before the send
+
+
+# --- Round 22: safe thread truncation, topup refresh, category gate ---
+
+
+async def test_thread_truncation_never_splits_an_entity(session, monkeypatch) -> None:
+    from tests.factories import make_user
+
+    from vpnbot.bot.handlers.admin import support as support_admin
+    from vpnbot.db.enums import TicketSender
+    from vpnbot.services import support as support_service
+
+    user = await make_user(session, telegram_id=900002201)
+    ticket = await support_service.create_ticket(session, user=user, text="<" * 2_500)
+    await support_service.add_message(
+        session, ticket=ticket, text="<" * 2_500,
+        sender_type=TicketSender.CUSTOMER, sender_id=user.id,
+    )
+    await session.commit()
+
+    captured: dict = {}
+
+    async def fake_reply(target, text, rows=None):  # noqa: ANN001, ANN202
+        captured["text"] = text
+
+    monkeypatch.setattr(support_admin.common, "reply", fake_reply)
+    await support_admin._show_thread(object(), session, object(), ticket.id)
+    text = captured["text"]
+    assert len(text) <= 4_096
+    # Each text is raw-truncated to 200 chars BEFORE escaping, so
+    # every "<" became a complete &lt; entity — nothing half-sliced.
+    assert text.count("&lt;") == 600  # subject line (200) + two messages (200 each)
+    import re
+
+    assert not re.search(r"&[a-z]{0,3}$", text)  # no dangling partial entity
+
+
+async def test_product_not_on_sale_when_category_disabled(session) -> None:
+    from tests.factories import make_catalog
+
+    from vpnbot.services import catalog as catalog_service
+
+    category, made, _plan = await make_catalog(session)
+    # Handlers always see the product through a query (category is
+    # joined-loaded there); fetch it the same way.
+    product = await catalog_service.get_product(session, made.id)
+    assert product is not None and product.is_on_sale
+    category.is_active = False
+    await session.flush()
+    await session.refresh(product.category)
+    assert not product.is_on_sale
+    category.is_active = True
+    await session.flush()
+    await session.refresh(product.category)
+    assert product.is_on_sale
