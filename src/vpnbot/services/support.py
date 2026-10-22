@@ -47,10 +47,18 @@ async def create_ticket(
             session, ticket=existing, text=text,
             sender_type=TicketSender.CUSTOMER, sender_id=user.id,
         )
-        # No fixed idempotency key: every follow-up should reach admins.
+        # Notify, but bucketed: one admin fan-out per ticket per 5
+        # minutes. Every follow-up used to enqueue a job per admin —
+        # an open ticket was an unlimited notification-spam hose
+        # pointed at every admin. The message itself is always
+        # stored; only the ping is coalesced.
+        import time as _time
+
+        bucket = int(_time.time() // 300)
         await notify.enqueue_admins(
             session,
             text=f"🎫 پیام جدید در تیکت #{existing.id} از کاربر {user.telegram_id}.",
+            idempotency_key=f"ticket:{existing.id}:followup:{bucket}",
         )
         return existing
     open_count = int(
@@ -152,13 +160,30 @@ async def count_tickets(session: AsyncSession, *, status: TicketStatus | None = 
     return int((await session.execute(stmt)).scalar_one())
 
 
-async def ticket_messages(session: AsyncSession, ticket_id: int) -> list[TicketMessage]:
-    return list(
+async def ticket_messages(
+    session: AsyncSession, ticket_id: int, *, limit: int | None = None
+) -> list[TicketMessage]:
+    stmt = select(TicketMessage).where(TicketMessage.ticket_id == ticket_id)
+    if limit is None:
+        stmt = stmt.order_by(TicketMessage.id.asc())
+    else:
+        # Latest N, returned chronologically — a long ticket's whole
+        # history used to be loaded into memory just to render the
+        # last screenful.
+        stmt = stmt.order_by(TicketMessage.id.desc()).limit(limit)
+    rows = list((await session.execute(stmt)).scalars())
+    if limit is not None:
+        rows.reverse()
+    return rows
+
+
+async def ticket_message_count(session: AsyncSession, ticket_id: int) -> int:
+    from sqlalchemy import func
+
+    return int(
         (
             await session.execute(
-                select(TicketMessage)
-                .where(TicketMessage.ticket_id == ticket_id)
-                .order_by(TicketMessage.id.asc())
+                select(func.count(TicketMessage.id)).where(TicketMessage.ticket_id == ticket_id)
             )
-        ).scalars()
+        ).scalar_one()
     )

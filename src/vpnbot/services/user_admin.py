@@ -35,7 +35,13 @@ _PENDING = (PaymentStatus.AWAITING_PAYMENT_DETAILS, PaymentStatus.PENDING_REVIEW
 
 
 async def block_user(session: AsyncSession, *, user_id: int, admin_id: int) -> dict[str, int]:
-    user = await session.get(User, user_id)
+    # Lock in the global order — user row, then orders, then
+    # payments/top-ups. This used to mutate payments from a plain
+    # unlocked select before ever touching the orders, the reverse
+    # of every payment path (and racy against a concurrent submit).
+    user = (
+        await session.execute(select(User).where(User.id == user_id).with_for_update())
+    ).scalar_one_or_none()
     if user is None:
         raise UserAdminError("کاربر یافت نشد")
     admin_row = (
@@ -54,7 +60,10 @@ async def block_user(session: AsyncSession, *, user_id: int, admin_id: int) -> d
     orders_cancelled = 0
     payments = (
         await session.execute(
-            select(Payment).join(Order, Order.id == Payment.order_id).where(Order.user_id == user_id)
+            select(Payment)
+            .join(Order, Order.id == Payment.order_id)
+            .where(Order.user_id == user_id)
+            .with_for_update()
         )
     ).scalars()
     for payment in payments:
@@ -81,7 +90,9 @@ async def block_user(session: AsyncSession, *, user_id: int, admin_id: int) -> d
 
     topups_cancelled = 0
     topups = (
-        await session.execute(select(WalletTopUp).where(WalletTopUp.user_id == user_id))
+        await session.execute(
+            select(WalletTopUp).where(WalletTopUp.user_id == user_id).with_for_update()
+        )
     ).scalars()
     for topup in topups:
         if topup.receipt_file_id:

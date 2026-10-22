@@ -363,13 +363,18 @@ async def cancel_order(
         # REJECTED joins the list so a cancelled order's payment can
         # never be resubmitted into the review queue; APPROVED joins
         # so a cancelled paid order does not keep a live-looking
-        # payment (its review record preserves the history) — and
-        # either way the TXID is freed like reject/expire do: the
-        # column is unique and txid_taken ignores status, so a
-        # cancelled payment's hash stayed burned forever and the
-        # customer could never resubmit that (real) transfer.
+        # payment (its review record preserves the history).
+        #
+        # The TXID is freed for never-approved payments (the hash may
+        # be unverified or even fake — holding it burned would let a
+        # squatter lock a stranger's real hash forever). An APPROVED
+        # payment's hash stays BOUND: that transfer was verified real
+        # and consumed, and freeing it after a refund would let the
+        # same single transfer fund a second order.
+        was_approved = payment.status is PaymentStatus.APPROVED
         payment.status = PaymentStatus.CANCELLED
-        payment.txid = None
+        if not was_approved:
+            payment.txid = None
 
     if attempts == 0:
         item = await inventory_service.item_for_order(session, order.id)

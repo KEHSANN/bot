@@ -135,6 +135,23 @@ class BlockedUserMiddleware(BaseMiddleware):
     def __init__(self) -> None:
         self._notified_at: dict[int, float] = {}
 
+    def _notice_allowed(self, telegram_id: int | None) -> bool:
+        """True (and stamps the cache) when this blocked user may be
+        told again. Shared by /start and button taps: the tap path
+        used to answer EVERY click over the network — up to the
+        throttle's 5/second — each one holding its handler session."""
+        if telegram_id is None:
+            return True
+        import time as _time
+
+        now = _time.monotonic()
+        if now - self._notified_at.get(telegram_id, 0.0) < self.NOTICE_INTERVAL_SECONDS:
+            return False
+        if len(self._notified_at) > 10_000:
+            self._notified_at.clear()
+        self._notified_at[telegram_id] = now
+        return True
+
     async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
         if not isinstance(event, (Message, CallbackQuery)):
             return await handler(event, data)
@@ -143,21 +160,12 @@ class BlockedUserMiddleware(BaseMiddleware):
         user = data.get("user")
         if user is None or not getattr(user, "is_blocked", False):
             return await handler(event, data)
+        telegram_id = getattr(user, "telegram_id", None)
         if isinstance(event, Message) and (event.text or "").startswith("/start"):
-            import time as _time
-
-            telegram_id = getattr(user, "telegram_id", None)
-            if telegram_id is None:
-                return await handler(event, data)
-            now = _time.monotonic()
-            last = self._notified_at.get(telegram_id, 0.0)
-            if now - last < self.NOTICE_INTERVAL_SECONDS:
+            if telegram_id is not None and not self._notice_allowed(telegram_id):
                 return None  # already told recently; drop silently
-            if len(self._notified_at) > 10_000:
-                self._notified_at.clear()
-            self._notified_at[telegram_id] = now
             return await handler(event, data)
-        if isinstance(event, CallbackQuery):
+        if isinstance(event, CallbackQuery) and self._notice_allowed(telegram_id):
             with contextlib.suppress(Exception):
                 await event.answer("⛔️ دسترسی شما مسدود شده است", show_alert=True)
         return None

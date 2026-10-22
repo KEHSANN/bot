@@ -280,6 +280,10 @@ class Worker:
     async def _notify(self, payload: dict) -> None:
         chat_id = int(payload["chat_id"])
         text = str(payload.get("text") or "")
+        # Admin notifications share the bot's global Telegram budget
+        # with broadcasts and deliveries — they go through the same
+        # rate limiter instead of bypassing it.
+        await self.limiter.acquire()
         await send_plain(self.bot, chat_id, text, _markup_from_payload(payload.get("reply_markup")))
 
     async def _broadcast_dispatch(self, payload: dict) -> None:
