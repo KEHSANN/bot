@@ -2915,7 +2915,6 @@ async def test_recover_requeues_stale_running(session, session_factory) -> None:
 
 async def test_admin_requeue_uses_canonical_key(session) -> None:
     from sqlalchemy import select
-
     from tests.factories import make_catalog, make_user
 
     from vpnbot.bot.handlers.admin.orders import _requeue
