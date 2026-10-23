@@ -98,13 +98,16 @@ def build_dispatcher(
     storage: BaseStorage | None = None,
 ) -> Dispatcher:
     chosen = storage if storage is not None else build_storage(settings)
-    dp = Dispatcher(storage=chosen or MemoryStorage())
+    fsm_storage = chosen or MemoryStorage()
+    dp = Dispatcher(storage=fsm_storage)
 
     session_mw = DbSessionMiddleware(session_factory)
     user_mw = UserLoaderMiddleware()
     admin_mw = AdminLoaderMiddleware()
     blocked_mw = BlockedUserMiddleware()
-    throttle_mw = ThrottleMiddleware()
+    # The throttle reads FSM state from the same storage to scope its
+    # never-drop media delay to flows that actually expect a file.
+    throttle_mw = ThrottleMiddleware(storage=fsm_storage)
 
     # Outer middleware order. Throttle runs FIRST, before any database
     # work: it keys purely off the Telegram user id on the update, so a

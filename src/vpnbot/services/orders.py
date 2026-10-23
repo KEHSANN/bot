@@ -279,7 +279,12 @@ async def cancel_preview_orders(
 
 
 async def cancel_order(
-    session: AsyncSession, order_id: int, *, reason: str | None = None, by_customer: bool = False
+    session: AsyncSession,
+    order_id: int,
+    *,
+    reason: str | None = None,
+    by_customer: bool = False,
+    force: bool = False,
 ) -> Order:
     order = await get_order(session, order_id, for_update=True)
     if order is None:
@@ -315,31 +320,48 @@ async def cancel_order(
         # to the pool and let it be sold twice.
         raise OrderError("سفارش در حال ارسال است؛ چند لحظه دیگر دوباره تلاش کنید")
 
-    # A delivery attempt means a send was tried: the pair may already
-    # be with the customer even if the worker recorded a failure.
-    # Auto-cancelling such an order cannot be made safe in one step —
-    # repooling risks a double sale, refunding risks a free config —
-    # so it is refused and left to manual review (the item stays
-    # RESERVED to this order and is never sold again either way).
+    # A delivery attempt means a send was tried. What cancelling may
+    # do depends on the attempts' outcomes — see the branch below:
+    # SENT/UNCERTAIN refuses outright, all-FAILED can be settled by
+    # an admin's forced cancel (refund without repool).
     from vpnbot.db.enums import InventoryStatus, LedgerKind, PaymentStatus
     from vpnbot.db.models.inventory import DeliveryAttempt, InventoryAssignment
     from vpnbot.services import inventory as inventory_service
     from vpnbot.services import wallet as wallet_service
 
-    attempts = int(
+    outcomes = list(
         (
             await session.execute(
-                select(func.count(DeliveryAttempt.id)).where(
-                    DeliveryAttempt.order_id == order.id
-                )
+                select(DeliveryAttempt.outcome).where(DeliveryAttempt.order_id == order.id)
             )
-        ).scalar_one()
+        ).scalars()
     )
+    attempts = len(outcomes)
     if attempts > 0:
-        raise OrderError(
-            "برای این سفارش تلاش تحویل ثبت شده است؛ لغو خودکار ممکن نیست "
-            "(احتمال تحویل کانفیگ). برای بررسی دستی با پشتیبانی هماهنگ کنید"
-        )
+        # A SENT or UNCERTAIN attempt means the pair may already be
+        # with the customer: cancelling would refund a delivered
+        # config, so even an admin cannot force those — settlement
+        # for them stays fully manual, outside the cancel path.
+        if any(outcome != "FAILED" for outcome in outcomes):
+            raise OrderError(
+                "برای این سفارش تلاش تحویل موفق یا نامشخص ثبت شده است؛ لغو ممکن نیست "
+                "(احتمال تحویل کانفیگ). برای بررسی دستی با پشتیبانی هماهنگ کنید"
+            )
+        if not (force and not by_customer):
+            raise OrderError(
+                "برای این سفارش تلاش تحویل ثبت شده است؛ لغو خودکار ممکن نیست "
+                "(احتمال تحویل کانفیگ). برای بررسی دستی با پشتیبانی هماهنگ کنید"
+            )
+        # force + every attempt FAILED (e.g. the customer blocked
+        # the bot — delivery provably never landed): the admin
+        # settles the order here. It cancels and refunds below, but
+        # the pair is NOT repooled — the repool further down stays
+        # gated on attempts == 0 — because a network-ambiguous
+        # failure keeps a small chance the config did arrive; the
+        # pair stays quarantined to this order rather than risk a
+        # double sale. Without this path such orders were stuck
+        # forever: paid, undeliverable, and uncancellable even from
+        # the admin panel.
 
     order.status = OrderStatus.CANCELLED
     order.notes = reason
@@ -390,17 +412,17 @@ async def cancel_order(
             if assignment is not None:
                 await session.delete(assignment)
 
-        # Wallet-paid orders refund themselves back to the wallet,
-        # exactly once (ledger idempotency key). Card/crypto payments
-        # were settled outside the bot — refunding those stays manual.
-        if refund_wallet:
-            await wallet_service.credit(
-                session,
-                user_id=order.user_id,
-                amount_irt=order.total_irt,
-                kind=LedgerKind.REFUND,
-                key=f"order:{order.id}:refund",
-                reason=f"استرداد لغو سفارش #{order.public_id}",
-            )
+    # Wallet-paid orders refund themselves back to the wallet,
+    # exactly once (ledger idempotency key). Card/crypto payments
+    # were settled outside the bot — refunding those stays manual.
+    if refund_wallet:
+        await wallet_service.credit(
+            session,
+            user_id=order.user_id,
+            amount_irt=order.total_irt,
+            kind=LedgerKind.REFUND,
+            key=f"order:{order.id}:refund",
+            reason=f"استرداد لغو سفارش #{order.public_id}",
+        )
     await session.flush()
     return order

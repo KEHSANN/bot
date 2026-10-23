@@ -23,6 +23,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiogram import BaseMiddleware
+from aiogram.fsm.storage.base import BaseStorage, StorageKey
 from aiogram.types import CallbackQuery, Message, TelegramObject, Update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -212,6 +213,24 @@ EVIDENCE_CONTENT_TYPES = frozenset(
     {"photo", "document", "video", "animation", "voice", "video_note"}
 )
 
+#: FSM states whose handler consumes an attachment as its payload.
+#: Only inside one of these does a media message earn the never-drop
+#: delay below: a photo sent mid-browse (or mid-flood) is ordinary
+#: traffic and takes the ordinary shed path. Scoping matters because
+#: the delay holds the update in the handler pipeline — granting it
+#: to every media message let any burst sender park updates for
+#: ~2.5s apiece, purchase flow or not.
+EVIDENCE_STATES = frozenset(
+    {
+        "CheckoutStates:awaiting_receipt",
+        "CheckoutStates:awaiting_txid",
+        "WalletStates:awaiting_receipt",
+        "WalletStates:awaiting_txid",
+        "SupportStates:awaiting_message",
+        "AdminStates:import_upload",
+    }
+)
+
 
 class ThrottleMiddleware(BaseMiddleware):
     """Per-user anti-spam limiter for callbacks and messages.
@@ -242,7 +261,9 @@ class ThrottleMiddleware(BaseMiddleware):
         evidence_max_wait: float = 2.5,
         notice_interval: float = 15.0,
         window: int = 3000,
+        storage: BaseStorage | None = None,
     ) -> None:
+        self.storage = storage
         self.callback_bucket_cfg = (callback_capacity, callback_refill)
         self.message_bucket_cfg = (message_capacity, message_refill)
         self.evidence_max_wait = evidence_max_wait
@@ -276,6 +297,29 @@ class ThrottleMiddleware(BaseMiddleware):
             store[uid] = bucket
         return bucket
 
+    async def _expects_evidence(self, event: Message, data: dict[str, Any], uid: int) -> bool:
+        """True when the sender's FSM state consumes an attachment.
+
+        Reads the dispatcher's FSM storage directly (the throttle
+        runs before the FSM context is resolved for the handler).
+        When the state cannot be determined — no storage wired, no
+        bot/chat on the update, storage error — the historical
+        behaviour wins: treat media as evidence. Never-drop on
+        uncertainty beats dropping a real receipt.
+        """
+        if self.storage is None:
+            return True
+        bot = data.get("bot")
+        chat = getattr(event, "chat", None)
+        if bot is None or chat is None:
+            return True
+        try:
+            key = StorageKey(bot_id=int(bot.id), chat_id=int(chat.id), user_id=uid)
+            current = await self.storage.get_state(key)
+        except Exception:  # noqa: BLE001 - uncertainty keeps never-drop
+            return True
+        return current in EVIDENCE_STATES
+
     async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
         if not isinstance(event, (Message, CallbackQuery)):
             return await handler(event, data)
@@ -303,7 +347,9 @@ class ThrottleMiddleware(BaseMiddleware):
 
         content_type = getattr(event, "content_type", None)
         content_value = getattr(content_type, "value", content_type)
-        if str(content_value) in EVIDENCE_CONTENT_TYPES:
+        if str(content_value) in EVIDENCE_CONTENT_TYPES and await self._expects_evidence(
+            event, data, uid
+        ):
             wait = bucket.wait_seconds(now)
             if wait <= self.evidence_max_wait:
                 # Never lose a receipt: hold the update briefly instead
@@ -327,6 +373,7 @@ __all__ = [
     "BlockedUserMiddleware",
     "DbSessionMiddleware",
     "EVIDENCE_CONTENT_TYPES",
+    "EVIDENCE_STATES",
     "ThrottleMiddleware",
     "TokenBucket",
     "UserLoaderMiddleware",

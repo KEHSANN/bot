@@ -372,59 +372,80 @@ async def pay_order_with_wallet(
             f"مبلغ سفارش: {format_irt_plain(order.total_irt)} تومان)"
         )
 
+    # Reserve the pair, debit and the approval tail share ONE
+    # savepoint: if any leg fails, all of it unwinds together and
+    # the handler's outer commit carries no trace of the attempt.
+    #
+    # The reservation used to happen seconds later in the worker,
+    # and nothing re-checked stock at payment time — with one pair
+    # left, five customers could all create orders (the create-time
+    # count still saw the pair AVAILABLE) and all pay by wallet;
+    # one was fulfilled and four stayed paid-but-undeliverable in
+    # FULFILLMENT_PENDING with no customer cancel path. Reserving
+    # here claims the pair atomically (FOR UPDATE SKIP LOCKED), so
+    # exactly one concurrent payer wins it and the rest are refused
+    # BEFORE any money moves. The worker's gate finds this
+    # reservation through reserve_for_order's idempotent path.
+    from vpnbot.services import inventory as inventory_service
+
     try:
-        await wallet_service.debit(
-            session,
-            user_id=user_id,
-            amount_irt=order.total_irt,
-            kind=LedgerKind.PURCHASE,
-            key=f"order:{order.id}:wallet",
-            reason=f"خرید سفارش {order.public_id}",
-            ref_type="order",
-            ref_id=str(order.id),
-        )
+        async with session.begin_nested():
+            try:
+                await inventory_service.reserve_for_order(session, order=order)
+            except inventory_service.NoInventoryAvailable:
+                raise PaymentError("موجودی این محصول به پایان رسیده است") from None
+            await wallet_service.debit(
+                session,
+                user_id=user_id,
+                amount_irt=order.total_irt,
+                kind=LedgerKind.PURCHASE,
+                key=f"order:{order.id}:wallet",
+                reason=f"خرید سفارش {order.public_id}",
+                ref_type="order",
+                ref_id=str(order.id),
+            )
+            now = utcnow()
+            if payment is None:
+                payment = Payment(order_id=order.id, amount_irt=order.total_irt, method=PaymentMethod.WALLET)
+                session.add(payment)
+            payment.method = PaymentMethod.WALLET
+            payment.amount_irt = order.total_irt
+            payment.status = PaymentStatus.APPROVED
+            payment.instructions_snapshot = {}
+            payment.submitted_at = now
+            payment.reviewed_at = now
+            payment.rejection_reason = None
+
+            order.status = OrderStatus.FULFILLMENT_PENDING
+            order.paid_at = order.paid_at or now
+            order.delivery_status = DeliveryStatus.PENDING
+            await session.flush()  # assigns payment.id for the audit row below
+
+            await audit_service.record(
+                session,
+                actor_type=AuditActor.CUSTOMER,
+                actor_id=user_id,
+                action="payment.wallet_paid",
+                entity_type="payment",
+                entity_id=payment.id,
+                data={"order_id": order.id, "amount_irt": order.total_irt},
+            )
+            await session.execute(
+                pg_insert(Job)
+                .values(
+                    kind=JobKind.FULFILL_ORDER,
+                    payload={"order_id": order.id},
+                    idempotency_key=f"fulfill:{order.id}",
+                    status=JobStatus.QUEUED,
+                )
+                .on_conflict_do_nothing(index_elements=["idempotency_key"])
+            )
+            await session.flush()
     except wallet_service.WalletError as exc:
         # A concurrent spend drained the balance between the check above
         # and the debit; surface it as a payment problem, not a crash.
         raise PaymentError(str(exc)) from exc
 
-    now = utcnow()
-    if payment is None:
-        payment = Payment(order_id=order.id, amount_irt=order.total_irt, method=PaymentMethod.WALLET)
-        session.add(payment)
-    payment.method = PaymentMethod.WALLET
-    payment.amount_irt = order.total_irt
-    payment.status = PaymentStatus.APPROVED
-    payment.instructions_snapshot = {}
-    payment.submitted_at = now
-    payment.reviewed_at = now
-    payment.rejection_reason = None
-
-    order.status = OrderStatus.FULFILLMENT_PENDING
-    order.paid_at = order.paid_at or now
-    order.delivery_status = DeliveryStatus.PENDING
-    await session.flush()  # assigns payment.id for the audit row below
-
-    await audit_service.record(
-        session,
-        actor_type=AuditActor.CUSTOMER,
-        actor_id=user_id,
-        action="payment.wallet_paid",
-        entity_type="payment",
-        entity_id=payment.id,
-        data={"order_id": order.id, "amount_irt": order.total_irt},
-    )
-    await session.execute(
-        pg_insert(Job)
-        .values(
-            kind=JobKind.FULFILL_ORDER,
-            payload={"order_id": order.id},
-            idempotency_key=f"fulfill:{order.id}",
-            status=JobStatus.QUEUED,
-        )
-        .on_conflict_do_nothing(index_elements=["idempotency_key"])
-    )
-    await session.flush()
     return payment
 
 

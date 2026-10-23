@@ -293,7 +293,11 @@ async def cancel_input(
         return
     order_id = int(data.get("order_id") or 0)
     try:
-        order = await order_service.cancel_order(session, order_id, reason=reason[:500])
+        # Admin-initiated cancel IS the manual review: force lets it
+        # settle orders whose delivery attempts all FAILED (e.g. the
+        # customer blocked the bot) — refund without repooling the
+        # pair. SENT/UNCERTAIN attempts still refuse in the service.
+        order = await order_service.cancel_order(session, order_id, reason=reason[:500], force=True)
     except order_service.OrderError as exc:
         await state.clear()
         await message.answer(f"⚠️ {exc}")
