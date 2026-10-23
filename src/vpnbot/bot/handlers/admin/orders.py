@@ -17,9 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from vpnbot.bot.handlers.admin import common
 from vpnbot.bot.keyboards.callbacks import AdminCB
 from vpnbot.bot.states import AdminStates
-from vpnbot.db.enums import DeliveryStatus, JobKind, JobStatus, OrderStatus, PaymentStatus, Permission
+from vpnbot.db.enums import DeliveryStatus, OrderStatus, PaymentStatus, Permission
 from vpnbot.db.models.orders import Order
-from vpnbot.db.models.system import Job
 from vpnbot.db.models.users import Admin, User
 from vpnbot.services import orders as order_service
 
@@ -169,51 +168,15 @@ async def _show_order(
 
 
 async def _requeue(session: AsyncSession, order: Order) -> bool:
-    """Insert a fresh fulfilment job unless one is already pending."""
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    """Insert a fresh fulfilment job unless one is already pending.
 
-    existing = (
-        await session.execute(
-            select(Job.id).where(
-                Job.kind == JobKind.FULFILL_ORDER,
-                Job.idempotency_key == f"fulfill:{order.id}",
-                Job.status.in_([JobStatus.QUEUED, JobStatus.RUNNING]),
-            )
-        )
-    ).first()
-    if existing is not None:
-        return False
-    # Same fixed idempotency key as everywhere else (the old
-    # ``:retry:<timestamp>`` key minted a SECOND live job for the
-    # same order whenever a restock requeue raced this button — two
-    # executions, one config delivered twice). Upsert: revive the
-    # canonical job when it is FAILED/DONE/QUEUED-in-backoff.
-    from vpnbot.db.base import utcnow
+    The upsert itself lives in services.fulfillment.enqueue_fulfill_job
+    so the customer's «receive again» button shares the exact same
+    canonical-job semantics.
+    """
+    from vpnbot.services import fulfillment as fulfillment_service
 
-    await session.execute(
-        pg_insert(Job)
-        .values(
-            kind=JobKind.FULFILL_ORDER,
-            payload={"order_id": order.id},
-            idempotency_key=f"fulfill:{order.id}",
-            status=JobStatus.QUEUED,
-        )
-        .on_conflict_do_update(
-            index_elements=["idempotency_key"],
-            set_={
-                "status": JobStatus.QUEUED,
-                "attempt": 0,
-                "scheduled_at": utcnow(),
-                "started_at": None,
-                "finished_at": None,
-                "last_error": None,
-            },
-            where=Job.status.in_([JobStatus.FAILED, JobStatus.DONE, JobStatus.QUEUED]),
-        )
-    )
-    order.delivery_status = DeliveryStatus.PENDING
-    await session.flush()
-    return True
+    return await fulfillment_service.enqueue_fulfill_job(session, order)
 
 
 @router.callback_query(AdminCB.filter(F.section == "orders"))

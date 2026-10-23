@@ -22,6 +22,7 @@ from vpnbot.bot.keyboards.callbacks import (
     MenuCB,
     OrderCancelCB,
     OrderCB,
+    OrderResendCB,
     OrderRevealCB,
     OrdersPageCB,
 )
@@ -213,6 +214,24 @@ async def order_detail(
                 )
             ]
         )
+    if (
+        order.status is OrderStatus.FULFILLMENT_PENDING
+        and payment is not None
+        and payment.status is PaymentStatus.APPROVED
+    ):
+        # Paid but not delivered yet — e.g. the delivery failed
+        # because the customer had blocked the bot. The resend button
+        # requeues the canonical fulfilment job; if they have since
+        # unblocked, the config arrives without burning a new pair.
+        extra_rows.append(
+            [
+                InlineKeyboardButton(
+                    text="🔄 تلاش مجدد برای دریافت کانفیگ",
+                    callback_data=OrderResendCB(order_id=order.id).pack(),
+                    style="primary",
+                )
+            ]
+        )
 
     await sender_for(callback.bot, session).show(
         callback,
@@ -258,6 +277,40 @@ async def cancel_own_order(
     await _show_page(callback, session, user, 0)
 
 
+@router.callback_query(OrderResendCB.filter())
+async def resend_config(
+    callback: CallbackQuery, callback_data: OrderResendCB, session: AsyncSession, user: User | None
+) -> None:
+    if user is None:
+        await callback.answer()
+        return
+    order = await order_service.user_order(session, order_id=callback_data.order_id, user_id=user.id)
+    payment = order.payment if order is not None else None
+    if (
+        order is None
+        or order.status is not OrderStatus.FULFILLMENT_PENDING
+        or payment is None
+        or payment.status is not PaymentStatus.APPROVED
+    ):
+        await alert(callback, "این سفارش در وضعیت قابل ارسال مجدد نیست")
+        return
+    from vpnbot.services import fulfillment as fulfillment_service
+
+    queued = await fulfillment_service.enqueue_fulfill_job(session, order)
+    # The job row must exist before we answer: commit first so a
+    # Telegram hiccup cannot roll the enqueue back (the phase split
+    # the rest of the customer side follows).
+    await session.commit()
+    if queued:
+        await alert(
+            callback,
+            "✅ درخواست ارسال مجدد ثبت شد؛ کانفیگ تا لحظاتی دیگر ارسال می‌شود.\n"
+            "اگر ربات را مسدود کرده‌اید، ابتدا آن را رفع مسدودیت کنید.",
+        )
+    else:
+        await alert(callback, "⏳ ارسال کانفیگ این سفارش در صف انجام است")
+
+
 @router.callback_query(OrderRevealCB.filter())
 async def reveal_config(
     callback: CallbackQuery, callback_data: OrderRevealCB, session: AsyncSession, user: User | None
@@ -281,7 +334,10 @@ async def reveal_config(
         await callback.answer("⏳ کانفیگ را تازه فرستادم؛ چند ثانیه صبر کنید", show_alert=False)
         return
     if len(_REVEAL_AT) > 10_000:
-        _REVEAL_AT.clear()
+        # Evict the oldest entries instead of clear(): a full clear
+        # would reset every user's reveal cooldown simultaneously.
+        for stale_id, _ in sorted(_REVEAL_AT.items(), key=lambda kv: kv[1])[:1_000]:
+            del _REVEAL_AT[stale_id]
     # The timestamp is stamped at SEND time below, not here: a tap
     # that fails validation (order not delivered, no item, decrypt
     # error) must not burn the customer's cooldown.

@@ -81,14 +81,15 @@ async def test_admin_force_cancel_settles_failed_delivery(session) -> None:
     await session.commit()
 
     # Plain cancel still refuses; the admin's forced cancel settles:
-    # refunded in full, but the pair stays quarantined (no repool).
+    # refunded in full, the pair quarantined (no repool) — and since
+    # round 26 it leaves the RESERVED limbo for DISABLED.
     with pytest.raises(order_service.OrderError):
         await order_service.cancel_order(session, order.id, reason="x")
     settled = await order_service.cancel_order(session, order.id, reason="ربات بلاک شده", force=True)
     assert settled.status is OrderStatus.CANCELLED
     assert await wallet_service.balance(session, user.id) == plan.price_irt
     item_after = await inventory_service.item_for_order(session, order.id)
-    assert item_after is not None and item_after.status is InventoryStatus.RESERVED
+    assert item_after is not None and item_after.status is InventoryStatus.DISABLED
     await session.refresh(payment)
     assert payment.status is PaymentStatus.CANCELLED
 

@@ -20,9 +20,21 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    # Optional password (defence in depth — Redis is NOT published;
+    # only this compose network reaches it). To enable: set
+    # REDIS_PASSWORD in .env AND set COMPOSE_REDIS_URL there to
+    # redis://:<the same password>@redis:6379/0 so the bot/worker
+    # services authenticate. (A dedicated variable, NOT REDIS_URL:
+    # an existing .env may carry the direct-install localhost URL,
+    # and Compose must never start honouring that inside the
+    # containers.) Unset (the default) keeps the historical
+    # passwordless behaviour — existing installs update safely
+    # with no .env change.
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    command: ["sh", "-c", "if [ -n \"$$REDIS_PASSWORD\" ]; then exec redis-server --save \"\" --appendonly no --requirepass \"$$REDIS_PASSWORD\"; else exec redis-server --save \"\" --appendonly no; fi"]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "if [ -n \"$$REDIS_PASSWORD\" ]; then redis-cli -a \"$$REDIS_PASSWORD\" ping; else redis-cli ping; fi | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -46,7 +58,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-vpnbot}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-vpnbot}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: ${COMPOSE_REDIS_URL:-redis://redis:6379/0}
       HEALTH_HOST: 0.0.0.0
       HEALTH_PORT: 8081
     command: ["vpnbot", "run"]
@@ -72,7 +84,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-vpnbot}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-vpnbot}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: ${COMPOSE_REDIS_URL:-redis://redis:6379/0}
     command: ["vpnbot", "worker"]
     restart: unless-stopped
     depends_on:
