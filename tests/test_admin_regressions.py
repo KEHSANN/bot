@@ -900,7 +900,6 @@ async def test_expiry_skips_pending_review_and_cancels_order(session) -> None:
 async def test_cancel_wallet_order_refunds_and_releases_stock(session) -> None:
     from tests.factories import make_catalog, make_user
 
-    from vpnbot.db.base import utcnow
     from vpnbot.db.enums import InventoryStatus, LedgerKind
     from vpnbot.db.models.inventory import InventoryAssignment
     from vpnbot.services import orders as order_service
@@ -930,17 +929,19 @@ async def test_cancel_wallet_order_refunds_and_releases_stock(session) -> None:
     await payment_service.pay_order_with_wallet(session, order=order, user_id=user.id)
     assert await wallet_service.balance(session, user.id) == 60_000
 
-    # Simulate the worker having reserved the unit for this order.
-    item.status = InventoryStatus.RESERVED
-    item.assigned_order_id = order.id
-    item.reserved_at = utcnow()
-    session.add(
-        InventoryAssignment(
-            inventory_item_id=item.id, order_id=order.id, user_id=user.id,
-            assigned_at=utcnow(),
+    # Since round 25 the payment itself reserves the unit (it used
+    # to happen later in the worker, and this test simulated that by
+    # hand). The reservation must already be real at this point.
+    from sqlalchemy import select as _select
+
+    await session.refresh(item)
+    assert item.status is InventoryStatus.RESERVED
+    assert item.assigned_order_id == order.id
+    assert (
+        await session.execute(
+            _select(InventoryAssignment).where(InventoryAssignment.order_id == order.id)
         )
-    )
-    await session.flush()
+    ).scalar_one_or_none() is not None
 
     await order_service.cancel_order(session, order.id, reason="درخواست مشتری")
     assert await wallet_service.balance(session, user.id) == 100_000  # refunded
@@ -1334,12 +1335,18 @@ async def test_cancel_order_race_and_attempt_guards(session) -> None:
     else:
         raise AssertionError("cancel during SENDING must be refused")
 
-    # 2) After a recorded delivery attempt, cancel is REFUSED outright
-    # (round 14 policy): the pair may already be with the customer, so
-    # neither repooling nor auto-refunding is safe — manual review.
-    # The order stays alive and the item stays RESERVED to it.
+    # 2) After a recorded delivery attempt, a plain cancel is REFUSED
+    # (round 14 policy, kept in round 25): the pair may already be
+    # with the customer, so neither repooling nor auto-refunding is
+    # safe — only an admin's forced cancel can settle an all-FAILED
+    # order (covered by its own test). The order stays alive and the
+    # item stays RESERVED to it. (The payment already reserved the
+    # pair in round 25; this used to simulate the worker's reserve
+    # by hand.)
     order.delivery_status = DeliveryStatus.PENDING
-    await inventory_reserve(session, item, order)
+    await session.refresh(item)
+    assert item.status is InventoryStatus.RESERVED
+    assert item.assigned_order_id == order.id
     from vpnbot.services import inventory as inventory_service
 
     await inventory_service.log_attempt(
@@ -3042,3 +3049,4 @@ async def test_ticket_messages_limit_and_count(session) -> None:
     latest = await support_service.ticket_messages(session, ticket.id, limit=3)
     assert [m.text for m in latest] == ["پیام شماره 3", "پیام شماره 4", "پیام شماره 5"]
     assert await support_service.ticket_message_count(session, ticket.id) == 7
+
