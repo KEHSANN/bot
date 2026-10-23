@@ -191,6 +191,32 @@ async def submit_crypto_evidence(
     return payment
 
 
+_URLISH_RE = re.compile(r"^(?:https?://|www\.|[\w-]+(?:\.[\w-]+)+/)")
+
+
+def _hash_from_link(cleaned: str) -> str | None:
+    """Extract the hash from a block-explorer link, or None.
+
+    Users paste links like ``https://tronscan.org/#/transaction/<hash>``
+    or ``https://etherscan.io/tx/0x<hash>`` instead of the bare hash.
+    The hash is the last non-empty path segment (query/fragment tail
+    cut). The extraction is accepted ONLY when that segment is a pure
+    hex string after canonicalisation — any other URL keeps failing
+    validation exactly as before, so link support cannot smuggle a
+    non-hash value into the TXID column.
+    """
+    if "/" not in cleaned or not _URLISH_RE.match(cleaned):
+        return None
+    segment = next((part for part in reversed(cleaned.split("/")) if part), "")
+    segment = segment.split("?", 1)[0].split("&", 1)[0].split("#", 1)[0]
+    candidate = segment.replace("-", "").replace("_", "")
+    while candidate.startswith("0x"):
+        candidate = candidate[2:]
+    if candidate and all(char in "0123456789abcdef" for char in candidate):
+        return candidate
+    return None
+
+
 def normalize_txid(raw: str) -> str:
     """Canonical TXID form: stripped and fully lowercased.
 
@@ -200,16 +226,30 @@ def normalize_txid(raw: str) -> str:
     then let the same transfer be submitted twice concurrently. Now the
     stored value is canonical, so the unique index itself enforces
     case-insensitive uniqueness.
+
+    A pasted block-explorer LINK is reduced to its hash first (see
+    _hash_from_link); bare hashes pass through unchanged.
     """
     cleaned = (raw or "").strip().lower()
+    extracted = _hash_from_link(cleaned)
+    if extracted is not None:
+        return extracted
     # Canonicalize equivalent spellings of the same transfer: an EVM
     # hash submitted as 0x<hex> and later as <hex> (or with cosmetic
     # - / _ separators) is ONE transaction — as different strings
     # they slipped past both lock_txid and the uniqueness probe and
     # the same transfer funded two purchases.
-    if cleaned.startswith("0x"):
+    #
+    # ORDER MATTERS (round 27): the separators must go FIRST and the
+    # 0x prefix must be stripped REPEATEDLY. The previous order
+    # (one startswith check, then separator removal) let ``_0x<hex>``,
+    # ``0_x<hex>`` and ``0x0x<hex>`` normalize to ``0x<hex>`` — a
+    # different stored string than the canonical ``<hex>`` for the
+    # SAME transfer — bypassing uniqueness entirely.
+    cleaned = cleaned.replace("-", "").replace("_", "")
+    while cleaned.startswith("0x"):
         cleaned = cleaned[2:]
-    return cleaned.replace("-", "").replace("_", "")
+    return cleaned
 
 
 _TXID_RE = re.compile(r"^[0-9a-z]{8,200}$")

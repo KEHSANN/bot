@@ -113,7 +113,16 @@ def parse_records(
         # A header row marks CSV even with a single column (a
         # sub_url-only file has no comma to give it away).
         reader = csv.reader(io.StringIO("\n".join(stripped)))
-        rows = list(reader)
+        try:
+            rows = list(reader)
+        except csv.Error as exc:
+            # A field past the csv module's 128KB limit raises
+            # csv.Error, which is NOT this module's ImportError — it
+            # used to crash the admin handler instead of producing
+            # the friendly "unreadable input" outcome.
+            raise ImportError(
+                "فایل CSV قابل خواندن نیست (احتمالاً یک فیلد بیش از حد بزرگ است)"
+            ) from exc
         header = [h.strip().lower() for h in rows[0]]
         idx_config = _find_header(header, "config")
         idx_sub = _find_header(header, "sub_url")
@@ -167,11 +176,21 @@ def _split_line(text: str) -> tuple[str, str]:
     # failed the http(s) check, rejecting perfectly valid single
     # configs.
     for sep in (*_SEPARATORS, ","):
-        if sep in text:
-            config, _, rest = text.partition(sep)
-            sub = rest.split(sep, 1)[0].strip()
-            if sub.lower().startswith(("http://", "https://")):
-                return config.strip(), sub
+        # The pair separator is the LAST separator directly followed
+        # by the subscription URL. Config URIs contain these
+        # separators themselves ("alpn=h2,http/1.1", "#A | B") and the
+        # URL may contain them in its own query ("?type=vless,vmess")
+        # — splitting at the FIRST occurrence (the old rule) mangled
+        # both sides: the config absorbed its glued-on link, and a
+        # comma inside the link's query truncated the link.
+        marker = max(text.rfind(sep + "http://"), text.rfind(sep + "https://"))
+        if marker > 0:
+            config = text[:marker].strip()
+            rest = text[marker + len(sep) :]
+            # A trailing "|label" column (pair format) is ignored;
+            # a raw "|" cannot appear inside a valid URL anyway.
+            sub = rest.split("|", 1)[0].strip()
+            return config, sub
     # Pair-shaped lines whose right side is NOT a URL: a "|" or TAB
     # appearing BEFORE any "#" fragment is the pair separator, so
     # this was meant to be a pair with a broken link (typo'd scheme).
@@ -186,9 +205,29 @@ def _split_line(text: str) -> tuple[str, str]:
     return text.strip(), ""
 
 
+# Delivery sends the config (and the link) as Telegram messages,
+# whose hard limit is 4096 characters including the surrounding
+# template. Stock longer than these caps could be imported and sold
+# but never delivered (TelegramBadRequest: message is too long left
+# the order stuck), so the caps are enforced here, at the only stock
+# intake.
+MAX_CONFIG_LENGTH = 3500
+MAX_SUB_URL_LENGTH = 1000
+
+
 def _record(line_no: int, config: str, sub: str, allow_config_only: bool) -> ParsedRecord:
     if not config:
         return ParsedRecord(line_no, config, sub or None, error="مقدار کانفیگ خالی است")
+    if len(config) > MAX_CONFIG_LENGTH:
+        return ParsedRecord(
+            line_no, config, sub or None,
+            error=f"کانفیگ بیش از حد طولانی است (حداکثر {MAX_CONFIG_LENGTH} کاراکتر)",
+        )
+    if sub and len(sub) > MAX_SUB_URL_LENGTH:
+        return ParsedRecord(
+            line_no, config, sub,
+            error=f"لینک اشتراک بیش از حد طولانی است (حداکثر {MAX_SUB_URL_LENGTH} کاراکتر)",
+        )
     if not sub and not allow_config_only:
         return ParsedRecord(line_no, config, None, error="لینک اشتراک (sub_url) وجود ندارد")
     if sub and not sub.lower().startswith(("http://", "https://")):
