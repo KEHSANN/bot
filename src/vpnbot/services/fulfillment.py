@@ -25,6 +25,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -38,6 +39,9 @@ from vpnbot.services import audit as audit_service
 from vpnbot.services import inventory as inventory_service
 from vpnbot.services import orders as order_service
 from vpnbot.services import referrals as referral_service
+
+if TYPE_CHECKING:
+    from vpnbot.db.models.orders import Order
 
 DeliverFn = Callable[[int, str, str | None, str, str], Awaitable[None]]
 """DeliverFn args: telegram_id, config, sub_url, product_title, order_public_id"""
@@ -64,6 +68,62 @@ class FulfillResult:
 
 class PaymentGateError(RuntimeError):
     """Raised when fulfilment is attempted without an approved payment."""
+
+
+async def enqueue_fulfill_job(session: AsyncSession, order: Order) -> bool:
+    """(Re)queue the one canonical fulfilment job for a paid order.
+
+    Returns False when a live job (QUEUED/RUNNING) already exists —
+    the caller is then just early, not wrong. A finished or failed
+    job is revived in place under the same ``fulfill:<id>`` key: the
+    old ``:retry:<timestamp>`` key minted a SECOND live job whenever
+    it raced a restock requeue, and the config was delivered twice.
+
+    Shared by the admin panel's requeue button and the customer's
+    «receive again» button (the unblock-then-resend path: a delivery
+    that failed with TelegramForbiddenError can be retried by the
+    customer once they unblock the bot, without burning the pair).
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from vpnbot.db.enums import JobKind, JobStatus
+    from vpnbot.db.models.system import Job
+
+    existing = (
+        await session.execute(
+            select(Job.id).where(
+                Job.kind == JobKind.FULFILL_ORDER,
+                Job.idempotency_key == f"fulfill:{order.id}",
+                Job.status.in_([JobStatus.QUEUED, JobStatus.RUNNING]),
+            )
+        )
+    ).first()
+    if existing is not None:
+        return False
+    await session.execute(
+        pg_insert(Job)
+        .values(
+            kind=JobKind.FULFILL_ORDER,
+            payload={"order_id": order.id},
+            idempotency_key=f"fulfill:{order.id}",
+            status=JobStatus.QUEUED,
+        )
+        .on_conflict_do_update(
+            index_elements=["idempotency_key"],
+            set_={
+                "status": JobStatus.QUEUED,
+                "attempt": 0,
+                "scheduled_at": utcnow(),
+                "started_at": None,
+                "finished_at": None,
+                "last_error": None,
+            },
+            where=Job.status.in_([JobStatus.FAILED, JobStatus.DONE, JobStatus.QUEUED]),
+        )
+    )
+    order.delivery_status = DeliveryStatus.PENDING
+    await session.flush()
+    return True
 
 
 async def requeue_pending_for_product(session: AsyncSession, *, product_id: int) -> int:

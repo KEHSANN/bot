@@ -149,7 +149,11 @@ class BlockedUserMiddleware(BaseMiddleware):
         if now - self._notified_at.get(telegram_id, 0.0) < self.NOTICE_INTERVAL_SECONDS:
             return False
         if len(self._notified_at) > 10_000:
-            self._notified_at.clear()
+            # Evict the OLDEST entries, never clear(): a full clear
+            # would reset every active user's notice gate at the same
+            # moment (the reveal-cooldown map does the same).
+            for stale_id, _ in sorted(self._notified_at.items(), key=lambda kv: kv[1])[:1_000]:
+                del self._notified_at[stale_id]
         self._notified_at[telegram_id] = now
         return True
 
@@ -220,13 +224,16 @@ EVIDENCE_CONTENT_TYPES = frozenset(
 #: the delay holds the update in the handler pipeline — granting it
 #: to every media message let any burst sender park updates for
 #: ~2.5s apiece, purchase flow or not.
+#:
+#: SupportStates.awaiting_message is deliberately NOT here: the
+#: support handler is text-only — a photo there just earns an error
+#: reply, it is never consumed as evidence.
 EVIDENCE_STATES = frozenset(
     {
         "CheckoutStates:awaiting_receipt",
         "CheckoutStates:awaiting_txid",
         "WalletStates:awaiting_receipt",
         "WalletStates:awaiting_txid",
-        "SupportStates:awaiting_message",
         "AdminStates:import_upload",
     }
 )
@@ -272,6 +279,13 @@ class ThrottleMiddleware(BaseMiddleware):
         self._callbacks: dict[int, TokenBucket] = {}
         self._messages: dict[int, TokenBucket] = {}
         self._noticed: dict[int, float] = {}
+        # Users with an evidence message currently parked in the
+        # delay below. wait_seconds() only COMPUTES the wait — it
+        # reserves nothing — so without this set, a burst of 100
+        # media updates from one user all computed a sub-cap wait
+        # and slept concurrently, parking 100 update tasks. At most
+        # one sleeper per user; the rest take the shed path.
+        self._waiting_evidence: set[int] = set()
         self._last_gc = time.monotonic()
 
     def _gc(self, now: float) -> None:
@@ -302,10 +316,16 @@ class ThrottleMiddleware(BaseMiddleware):
 
         Reads the dispatcher's FSM storage directly (the throttle
         runs before the FSM context is resolved for the handler).
-        When the state cannot be determined — no storage wired, no
-        bot/chat on the update, storage error — the historical
-        behaviour wins: treat media as evidence. Never-drop on
-        uncertainty beats dropping a real receipt.
+
+        Failure policy: if the storage read RAISES (Redis down or
+        slow), return False — shed. During a storage outage the FSM
+        itself is failing too, so a delayed receipt would die in the
+        handler anyway; delaying buys nothing and would park every
+        burst media message in a sleep at the worst possible moment.
+        When the state cannot even be ADDRESSED (no storage wired,
+        no bot/chat on the update) the historical behaviour wins:
+        treat media as evidence. Never-drop on uncertainty beats
+        dropping a real receipt.
         """
         if self.storage is None:
             return True
@@ -316,8 +336,8 @@ class ThrottleMiddleware(BaseMiddleware):
         try:
             key = StorageKey(bot_id=int(bot.id), chat_id=int(chat.id), user_id=uid)
             current = await self.storage.get_state(key)
-        except Exception:  # noqa: BLE001 - uncertainty keeps never-drop
-            return True
+        except Exception:  # noqa: BLE001 - storage outage: shed, don't pile up sleeps
+            return False
         return current in EVIDENCE_STATES
 
     async def __call__(self, handler: Handler, event: TelegramObject, data: dict[str, Any]) -> Any:
@@ -351,11 +371,17 @@ class ThrottleMiddleware(BaseMiddleware):
             event, data, uid
         ):
             wait = bucket.wait_seconds(now)
-            if wait <= self.evidence_max_wait:
+            if wait <= self.evidence_max_wait and uid not in self._waiting_evidence:
                 # Never lose a receipt: hold the update briefly instead
                 # of dropping it. Under genuine flood this still caps the
-                # rate — the sender just experiences a short delay.
-                await asyncio.sleep(wait + 0.05)
+                # rate — the sender just experiences a short delay. Only
+                # ONE parked sleeper per user (see _waiting_evidence):
+                # further media in the same burst takes the shed path.
+                self._waiting_evidence.add(uid)
+                try:
+                    await asyncio.sleep(wait + 0.05)
+                finally:
+                    self._waiting_evidence.discard(uid)
                 if bucket.allow(time.monotonic()):
                     return await handler(event, data)
             # Even evidence cannot wait forever; fall through to the

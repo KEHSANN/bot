@@ -411,6 +411,26 @@ async def cancel_order(
             ).scalar_one_or_none()
             if assignment is not None:
                 await session.delete(assignment)
+    elif force:
+        # Forced settlement of an all-FAILED order: the pair leaves
+        # the RESERVED limbo for DISABLED. It stays burned (never
+        # resold — a network-ambiguous failure might have delivered
+        # it), but RESERVED-forever was a lockup of its own: the
+        # item could not be disabled (disable_item refuses RESERVED),
+        # the product could not be deleted (deletion refuses
+        # RESERVED), and the stock stats counted it as in-flight
+        # forever — so a customer could burn one pair per
+        # buy/block/refund cycle at zero net cost. DISABLED is the
+        # terminal quarantine state: out of the counts, deletable
+        # with its product, still never sellable again. The
+        # assignment row stays as the historical record.
+        from vpnbot.db.base import utcnow
+
+        item = await inventory_service.item_for_order(session, order.id)
+        if item is not None and item.status is InventoryStatus.RESERVED:
+            item.status = InventoryStatus.DISABLED
+            item.disabled_at = utcnow()
+            item.disabled_reason = "force-cancelled after failed delivery"
 
     # Wallet-paid orders refund themselves back to the wallet,
     # exactly once (ledger idempotency key). Card/crypto payments

@@ -53,6 +53,13 @@ class OrderRevealCB(CallbackData, prefix="or"):
     order_id: int
 
 
+class OrderResendCB(CallbackData, prefix="ors"):
+    """Ask the worker to retry delivery of a paid, undelivered order
+    (e.g. after the customer unblocks the bot)."""
+
+    order_id: int
+
+
 class OrderPayCB(CallbackData, prefix="opay"):
     """Re-enter checkout for an existing unpaid order (e.g. after the
     payment was rejected) so the receipt can be submitted again."""
