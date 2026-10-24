@@ -9,6 +9,8 @@ is at the GitHub connector's single-argument push ceiling).
 
 from __future__ import annotations
 
+from datetime import UTC
+
 from tests.test_admin_regressions import _stock  # noqa: F401  (shared helper)
 
 
@@ -379,3 +381,58 @@ def test_html_error_escape_is_parse_safe() -> None:
 
     assert escape("تگ HTML مجاز نیست: <script>") == "تگ HTML مجاز نیست: &lt;script&gt;"
     assert escape("کاراکتر < یا > باز") == "کاراکتر &lt; یا &gt; باز"
+
+
+async def test_blocked_middleware_clears_telegram_key_not_db_pk() -> None:
+    """Round-29 follow-up: _clear_blocked_state must key FSM state by
+    the Telegram id. The first version used the DB row PK, so it
+    zeroed an unrelated key while the blocked user's real state —
+    and the throttle's evidence delay for it — survived."""
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    from aiogram.fsm.storage.base import StorageKey
+    from aiogram.fsm.storage.memory import MemoryStorage
+    from aiogram.types import Chat, Message
+    from aiogram.types import User as TgUser
+
+    from vpnbot.bot.middlewares.context import BlockedUserMiddleware
+
+    storage = MemoryStorage()
+    bot_id, chat_id, telegram_id, db_pk = 12345, 777, 900002999, 7
+    real_key = StorageKey(bot_id=bot_id, chat_id=chat_id, user_id=telegram_id)
+    wrong_key = StorageKey(bot_id=bot_id, chat_id=chat_id, user_id=db_pk)
+    await storage.set_state(real_key, "CheckoutStates:awaiting_receipt")
+    await storage.set_data(real_key, {"draft": 1})
+    await storage.set_state(wrong_key, "CheckoutStates:awaiting_receipt")
+    await storage.set_data(wrong_key, {"draft": 1})
+
+    mw = BlockedUserMiddleware(storage=storage)
+    message = Message(
+        message_id=1,
+        date=datetime.now(UTC),
+        chat=Chat(id=chat_id, type="private"),
+        from_user=TgUser(id=telegram_id, is_bot=False, first_name="t"),
+        text="hello",
+    )
+    calls: list[str] = []
+
+    async def handler(event, data):
+        calls.append("passed")
+
+    result = await mw(
+        handler,
+        message,
+        {
+            "bot": SimpleNamespace(id=bot_id),
+            "user": SimpleNamespace(id=db_pk, telegram_id=telegram_id, is_blocked=True),
+        },
+    )
+    assert result is None  # dropped
+    assert calls == []
+    # The real (Telegram-id) state is gone...
+    assert await storage.get_state(real_key) is None
+    assert await storage.get_data(real_key) == {}
+    # ...and the unrelated DB-PK key was left alone.
+    assert await storage.get_state(wrong_key) == "CheckoutStates:awaiting_receipt"
+    assert await storage.get_data(wrong_key) == {"draft": 1}

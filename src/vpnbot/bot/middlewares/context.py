@@ -154,6 +154,15 @@ class BlockedUserMiddleware(BaseMiddleware):
         user = data.get("user")
         if bot is None or user is None:
             return
+        # data["user"] is the DATABASE row: user.id is the table PK,
+        # not the Telegram id. aiogram keys FSM state by the Telegram
+        # ids (see _expects_evidence, which uses tg_user.id), so
+        # clearing with user.id would zero an unrelated key and leave
+        # the blocked user's real state — and the throttle's evidence
+        # delay — untouched.
+        telegram_id = getattr(user, "telegram_id", None)
+        if telegram_id is None:
+            return
         chat_id: int | None = None
         if isinstance(event, Message) and event.chat is not None:
             chat_id = event.chat.id
@@ -165,7 +174,7 @@ class BlockedUserMiddleware(BaseMiddleware):
             from aiogram.fsm.storage.base import StorageKey
 
             key = StorageKey(
-                bot_id=int(bot.id), chat_id=int(chat_id), user_id=int(user.id)
+                bot_id=int(bot.id), chat_id=int(chat_id), user_id=int(telegram_id)
             )
             await self.storage.set_state(key, None)
             await self.storage.set_data(key, {})
