@@ -151,7 +151,7 @@ async def _show_section(
 ) -> None:
     entry = _at(index)
     if entry is None:
-        await common.reply(target, "بخش یافت نشد.", [[common.back("settings")]])
+        await common.reply(target, "بخش یافت نشد.", [[common.back("settings")]], session=session)
         return
     key, title, fields = entry
     service = settings_service.SettingsService(session)
@@ -168,7 +168,7 @@ async def _show_section(
         else:
             rows.append([common.btn(f"✏️ {label}", "settings", f"edit:{index}:{name}")])
     rows.append([common.btn("⬅️ بخش‌ها", "settings")])
-    await common.reply(target, "\n".join(lines), rows)
+    await common.reply(target, "\n".join(lines), rows, session=session)
 
 
 def _prompt(index: int, label: str, kind: str) -> str:
@@ -229,7 +229,7 @@ async def settings_router(
             settings_index=index, settings_key=entry[0], settings_field=name, settings_kind=field[2]
         )
         await callback.answer()
-        await common.reply(callback, _prompt(index, field[1], field[2]), [common.cancel_row()])
+        await common.reply(callback, _prompt(index, field[1], field[2]), [common.cancel_row()], session=session)
         return
 
     await _show_sections(callback)

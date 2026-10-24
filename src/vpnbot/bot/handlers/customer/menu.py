@@ -146,6 +146,10 @@ async def static_nav(
     # menu button stays in the wizard state, and their next text
     # message is consumed as wizard input — the customer-section
     # entries were the ones the earlier bleed fixes missed.
+    # Abandoning a checkout from here cancels its unpaid order too
+    # (same as /cancel): otherwise three abandoned checkouts lock
+    # the customer out via the open-order cap.
+    await cancel_open_order_from_state(session, user, state)
     await state.clear()
     sender = sender_for(callback.bot, session)
     await sender.show(callback, STATIC_ACTIONS[callback_data.action], base_context(user))

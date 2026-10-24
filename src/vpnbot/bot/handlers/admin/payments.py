@@ -392,6 +392,7 @@ async def approve_input(
             await _show_topups(message, session, admin, 0)
             return
         await state.clear()
+        await session.commit()  # tell the admin only after the approval lands
         await message.answer(
             f"✅ شارژ #{topup.id} تأیید شد و {common.money(topup.amount_irt)} تومان "
             "به کیف پول مشتری اضافه شد."
@@ -410,6 +411,7 @@ async def approve_input(
         await _show_list(message, session, admin, 0)
         return
     await state.clear()
+    await session.commit()  # tell the admin only after the approval lands
     await message.answer(
         f"✅ پرداخت #{payment.id} تأیید شد.\n"
         "سفارش در صف ارسال قرار گرفت؛ کانفیگ پس از ارسال به مشتری تحویل داده می‌شود."
@@ -440,6 +442,7 @@ async def reject_input(
             await _show_topups(message, session, admin, 0)
             return
         await state.clear()
+        await session.commit()  # tell the admin only after the rejection lands
         await message.answer(f"⛔️ شارژ #{topup.id} رد شد.")
         await _show_topups(message, session, admin, 0)
         return
@@ -455,5 +458,6 @@ async def reject_input(
         await _show_list(message, session, admin, 0)
         return
     await state.clear()
+    await session.commit()  # tell the admin only after the rejection lands
     await message.answer(f"⛔️ پرداخت #{payment.id} رد شد و دلیل برای مشتری ثبت می‌شود.")
     await _show_list(message, session, admin, 0)

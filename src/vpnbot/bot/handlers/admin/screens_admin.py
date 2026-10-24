@@ -117,6 +117,7 @@ async def _show_list(
         "تغییرات ابتدا در «پیش‌نویس» ذخیره می‌شود و با «انتشار» روی ربات اعمال می‌شود.\n"
         "نسخه‌های منتشرشده تغییرناپذیرند و همیشه قابل بازگردانی هستند.",
         rows,
+        session=session,
     )
 
 
@@ -125,7 +126,7 @@ async def _show_stage(
 ) -> None:
     stage = _stage_at(index)
     if stage is None:
-        await common.reply(target, "صفحه یافت نشد.", [[common.back("screens")]])
+        await common.reply(target, "صفحه یافت نشد.", [[common.back("screens")]], session=session)
         return
     service = screen_service.ScreenService(session)
     definition = await service.get_or_create(stage)
@@ -164,7 +165,7 @@ async def _show_stage(
         ]
     )
     rows.append([common.back("screens")])
-    await common.reply(target, "\n".join(lines), rows)
+    await common.reply(target, "\n".join(lines), rows, session=session)
 
 
 # --------------------------------------------------------------------------
@@ -175,7 +176,7 @@ async def _show_messages(
 ) -> None:
     stage = _stage_at(index)
     if stage is None:
-        await common.reply(target, "صفحه یافت نشد.", [[common.back("screens")]])
+        await common.reply(target, "صفحه یافت نشد.", [[common.back("screens")]], session=session)
         return
     service = screen_service.ScreenService(session)
     definition = await service.get_or_create(stage)
@@ -205,6 +206,7 @@ async def _show_messages(
         f"<b>✏️ پیام‌های «{common.escape(_title(stage))}»</b>\n\n"
         f"ترتیب نمایش از بالا به پایین است. حداکثر {screen_service.MAX_MESSAGES} پیام.",
         rows,
+        session=session,
     )
 
 
@@ -213,14 +215,15 @@ async def _show_message(
 ) -> None:
     stage = _stage_at(index)
     if stage is None:
-        await common.reply(target, "صفحه یافت نشد.", [[common.back("screens")]])
+        await common.reply(target, "صفحه یافت نشد.", [[common.back("screens")]], session=session)
         return
     service = screen_service.ScreenService(session)
     definition = await service.get_or_create(stage)
     messages = list(definition.draft_messages or [])
     if not 0 <= position < len(messages):
         await common.reply(
-            target, "پیام یافت نشد.", [[common.btn("⬅️ پیام‌ها", "screens", "msgs", index)]]
+            target, "پیام یافت نشد.", [[common.btn("⬅️ پیام‌ها", "screens", "msgs", index)]],
+            session=session,
         )
         return
     message = messages[position]
@@ -253,7 +256,7 @@ async def _show_message(
     if len(messages) > 1:
         rows.append([common.btn("🗑 حذف پیام", "screens", "msgdel", index, position)])
     rows.append([common.btn("⬅️ پیام‌ها", "screens", "msgs", index)])
-    await common.reply(target, "\n".join(lines), rows)
+    await common.reply(target, "\n".join(lines), rows, session=session)
 
 
 # --------------------------------------------------------------------------
@@ -280,7 +283,7 @@ async def _show_buttons(
 ) -> None:
     stage = _stage_at(index)
     if stage is None:
-        await common.reply(target, "صفحه یافت نشد.", [[common.back("screens")]])
+        await common.reply(target, "صفحه یافت نشد.", [[common.back("screens")]], session=session)
         return
     service = screen_service.ScreenService(session)
     definition = await service.get_or_create(stage)
@@ -298,6 +301,7 @@ async def _show_buttons(
         "دکمه‌ها بر اساس «ردیف» کنار هم قرار می‌گیرند. حداکثر "
         f"{screen_service.MAX_BUTTONS} دکمه.",
         rows,
+        session=session,
     )
 
 
@@ -306,14 +310,15 @@ async def _show_button(
 ) -> None:
     stage = _stage_at(index)
     if stage is None:
-        await common.reply(target, "صفحه یافت نشد.", [[common.back("screens")]])
+        await common.reply(target, "صفحه یافت نشد.", [[common.back("screens")]], session=session)
         return
     service = screen_service.ScreenService(session)
     definition = await service.get_or_create(stage)
     buttons = list(definition.draft_buttons or [])
     if not 0 <= position < len(buttons):
         await common.reply(
-            target, "دکمه یافت نشد.", [[common.btn("⬅️ دکمه‌ها", "screens", "btns", index)]]
+            target, "دکمه یافت نشد.", [[common.btn("⬅️ دکمه‌ها", "screens", "btns", index)]],
+            session=session,
         )
         return
     button = buttons[position]
@@ -360,7 +365,7 @@ async def _show_button(
         ],
         [common.btn("⬅️ دکمه‌ها", "screens", "btns", index)],
     ]
-    await common.reply(target, "\n".join(lines), rows)
+    await common.reply(target, "\n".join(lines), rows, session=session)
 
 
 # --------------------------------------------------------------------------
@@ -419,6 +424,7 @@ async def screens_router(
             f"<b>📤 انتشار «{common.escape(_title(str(stage)))}»</b>\n\n"
             "پیش‌نویس فعلی برای همه کاربران فعال می‌شود. ادامه می‌دهید؟",
             [common.yes_no("screens", "publish_yes", index)],
+            session=session,
         )
         return
 
@@ -481,6 +487,7 @@ async def screens_router(
             f"<b>🕘 نسخه‌های «{common.escape(_title(str(stage)))}»</b>\n\n"
             "برای بازگردانی یک نسخه، روی آن بزنید. نسخه قدیمی به‌عنوان نسخه جدید منتشر می‌شود.",
             rows,
+            session=session,
         )
         return
 
@@ -522,6 +529,7 @@ async def screens_router(
                 "متغیرهای مجاز: "
                 + ", ".join(f"{{{v}}}" for v in sorted(screen_service.SAFE_VARIABLES)),
                 [common.cancel_row()],
+                session=session,
             )
             return
         if not 0 <= position < len(messages):
@@ -545,6 +553,7 @@ async def screens_router(
                 "متغیرهای مجاز: "
                 + ", ".join(f"{{{v}}}" for v in sorted(screen_service.SAFE_VARIABLES)),
                 [common.cancel_row()],
+                session=session,
             )
             return
         # msgdelay
@@ -561,6 +570,7 @@ async def screens_router(
             f"<b>⏱ تأخیر پیام {position + 1}</b>\n\n"
             "تأخیر قبل از ارسال را به میلی‌ثانیه بفرستید (۰ تا ۳۰۰۰).",
             [common.cancel_row()],
+            session=session,
         )
         return
 
@@ -630,6 +640,7 @@ async def screens_router(
                 "ردیف عدد کوچکی است (۰ به بالا)؛ دکمه‌های هم‌ردیف کنار هم می‌آیند.\n\n"
                 "مثال: <code>🛍 محصولات | shop | 0</code>",
                 [common.cancel_row()],
+                session=session,
             )
             return
         if not 0 <= position < len(buttons):
@@ -656,7 +667,7 @@ async def screens_router(
                 "(اکشن داخلی یا لینک https):"
             )
         await callback.answer()
-        await common.reply(callback, f"<b>✏️ ویرایش دکمه</b>\n\n{prompt}", [common.cancel_row()])
+        await common.reply(callback, f"<b>✏️ ویرایش دکمه</b>\n\n{prompt}", [common.cancel_row()], session=session)
         return
 
     if action in ("btnrow", "btnrowplus"):
