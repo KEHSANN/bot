@@ -194,11 +194,10 @@ async def test_failed_send_keeps_the_reservation_for_retry(
 async def test_paid_order_without_stock_waits_instead_of_being_lost(
     session, session_factory, cipher, fingerprint_secret, admin
 ) -> None:
-    # Round 29 moved the wait: approval now reserves the pair (wallet
-    # parity), so an approval with an empty shelf FAILS instead of
-    # queueing a job that discovers NO_INVENTORY at worker time.
-    # Nothing is lost — the receipt stays in review and the same
-    # approval succeeds once the pair is back on the shelf.
+    # Round 29b (owner request): the automatic wait is back. Approval
+    # reserves when a pair is available, but an empty shelf no longer
+    # fails the approval — the order waits in FULFILLMENT_PENDING and
+    # a restock makes it fulfillable again, with no second approval.
     user, order, payment = await _prepare_card_payment(session, cipher, fingerprint_secret)
     await payment_service.submit_card_receipt(
         session, payment_id=payment.id, user_id=user.id, file_id="r", file_type="photo"
@@ -213,14 +212,17 @@ async def test_paid_order_without_stock_waits_instead_of_being_lost(
             )
         )
         await other.commit()
-    with pytest.raises(payment_service.PaymentError, match="موجودی"):
-        await payment_service.approve_payment(session, payment_id=payment.id, admin_id=admin.id)
-    await session.refresh(payment)
+    approved = await payment_service.approve_payment(
+        session, payment_id=payment.id, admin_id=admin.id
+    )
+    assert approved.status is PaymentStatus.APPROVED
     await session.refresh(order)
-    assert payment.status is PaymentStatus.PENDING_REVIEW
-    assert order.status is OrderStatus.PENDING_PAYMENT
+    assert order.status is OrderStatus.FULFILLMENT_PENDING
+    # Waiting, not holding: no pair reserved for this order.
+    assert await inventory_service.item_for_order(session, order.id) is None
 
-    # A fresh pair on the shelf; the same approval now succeeds.
+    # Restock: the queued job can now proceed — the worker's reserve
+    # finds the fresh pair for this order.
     from tests.test_admin_regressions import _stock
 
     from vpnbot.db.models.catalog import Plan, Product
@@ -229,12 +231,8 @@ async def test_paid_order_without_stock_waits_instead_of_being_lost(
     plan = await session.get(Plan, order.plan_id)
     await _stock(session, product, plan, 1, "restock")
     await session.commit()
-    approved = await payment_service.approve_payment(
-        session, payment_id=payment.id, admin_id=admin.id
-    )
-    assert approved.status is PaymentStatus.APPROVED
-    await session.refresh(order)
-    assert order.status is OrderStatus.FULFILLMENT_PENDING
+    pair = await inventory_service.reserve_for_order(session, order=order)
+    assert pair is not None
 
 
 async def test_rejected_payment_cannot_be_fulfilled(

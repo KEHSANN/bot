@@ -576,22 +576,21 @@ async def approve_payment(
     if order.status not in (OrderStatus.PENDING_PAYMENT, OrderStatus.PAID):
         raise PaymentError("وضعیت سفارش اجازه تأیید پرداخت را نمی‌دهد")
 
-    # Reserve the pair inside the approval transaction, like the
-    # wallet path does at pay time: without it, approval enqueued a
-    # job that only discovered an empty shelf at worker time, and a
-    # wallet buyer could take the last pair between approval and the
-    # worker run. If the shelf is empty the approval now fails with
-    # a clear message and the receipt stays in review, so the admin
-    # approves again after a restock instead of stranding a paid
-    # order in NO_INVENTORY.
+    # Reserve opportunistically, like the wallet path does at pay
+    # time: when a pair is available it is held for this order inside
+    # the approval transaction, closing the race where a wallet buyer
+    # took the last pair between approval and the worker run. When
+    # the shelf is empty the approval still succeeds and the order
+    # waits — a restock revives its queued job automatically (the
+    # pre-round-29 wait semantics, restored at the owner's request:
+    # round 29 failed the approval on empty stock instead, which
+    # retired the automatic wait in favour of a manual re-approval).
+    import contextlib
+
     from vpnbot.services import inventory as inventory_service
 
-    try:
+    with contextlib.suppress(inventory_service.NoInventoryAvailable):
         await inventory_service.reserve_for_order(session, order=order)
-    except inventory_service.NoInventoryAvailable:
-        raise PaymentError(
-            "موجودی این محصول به پایان رسیده است؛ پس از شارژ انبار دوباره تأیید کنید"
-        ) from None
 
     now = utcnow()
     payment.status = PaymentStatus.APPROVED

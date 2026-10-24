@@ -160,8 +160,11 @@ async def test_receipt_refused_when_product_disabled_or_shelf_empty(session) -> 
         raise AssertionError("receipt accepted with an empty shelf")
 
 
-async def test_approve_reserves_pair_and_refuses_empty_shelf(session) -> None:
-    """approve_payment reserves inside the approval transaction."""
+async def test_approve_reserves_pair_and_waits_on_empty_shelf(session) -> None:
+    """Approve-time reservation (round 29) with the restored wait
+    (round 29b): a pair on the shelf is held at approval, closing the
+    wallet-buyer race; an empty shelf no longer fails the approval —
+    the order waits and a restock revives it."""
     from tests.factories import make_catalog, make_user
 
     from vpnbot.db.enums import (
@@ -203,7 +206,8 @@ async def test_approve_reserves_pair_and_refuses_empty_shelf(session) -> None:
     await session.refresh(order)
     assert order.status is OrderStatus.FULFILLMENT_PENDING
 
-    # Second order, empty shelf now: approval fails, receipt stays in review.
+    # Second order, empty shelf now: approval still succeeds and the
+    # order waits — no pair held, nothing lost, restock revives it.
     user2 = await make_user(session, telegram_id=900002905)
     order2 = await order_service.create_order(
         session, user_id=user2.id, plan_id=plan.id, product=product, plan=plan
@@ -224,16 +228,13 @@ async def test_approve_reserves_pair_and_refuses_empty_shelf(session) -> None:
         )
     )
     await session.commit()
-    try:
-        await payment_service.approve_payment(
-            session, payment_id=payment2.id, admin_id=admin.id
-        )
-    except payment_service.PaymentError as exc:
-        assert "موجودی" in str(exc)
-    else:  # pragma: no cover
-        raise AssertionError("approval succeeded with an empty shelf")
-    await session.refresh(payment2)
-    assert payment2.status is PaymentStatus.PENDING_REVIEW
+    approved2 = await payment_service.approve_payment(
+        session, payment_id=payment2.id, admin_id=admin.id
+    )
+    assert approved2.status is PaymentStatus.APPROVED
+    await session.refresh(order2)
+    assert order2.status is OrderStatus.FULFILLMENT_PENDING
+    assert await inventory_service.item_for_order(session, order2.id) is None
 
 
 async def test_enqueue_refuses_stale_fulfilled_order(session, session_factory) -> None:
