@@ -403,9 +403,49 @@ async def send_config_pair(
             "⚠️ این اطلاعات فقط برای شماست. در اختیار دیگران قرار ندهید.",
         ]
     )
+    text = "\n".join(lines)
+    if sub_url and len(text) > 4000:
+        # A COMBO pair at the intake caps (config 3500 + link 1000)
+        # exceeds Telegram's 4096-character message limit, and one
+        # oversized send would fail all 8 delivery attempts with
+        # TelegramBadRequest while the pair stayed RESERVED. Split
+        # instead: the config goes out alone, then the link alone.
+        # (A failed second send still retries the job, so the config
+        # may repeat — same recipient, same pair, no new exposure.)
+        config_lines = [
+            "🎉 <b>سفارش شما تأیید شد</b>",
+            "",
+            f"محصول: {_html.escape(product_title)}",
+            f"کد سفارش: <code>{_html.escape(order_ref)}</code>",
+            "",
+            "<b>کانفیگ:</b>",
+            f"<pre>{_html.escape(config)}</pre>",
+            "",
+            "⚠️ این اطلاعات فقط برای شماست. در اختیار دیگران قرار ندهید.",
+        ]
+        link_lines = [
+            "🔗 <b>لینک اشتراک:</b>",
+            _html.escape(sub_url),
+            "",
+            "این لینک را در برنامه VPN خود وارد کنید.",
+            "⚠️ این لینک شخصی است؛ آن را با دیگران به اشتراک نگذارید.",
+        ]
+        await bot.send_message(
+            chat_id=chat_id,
+            text="\n".join(config_lines),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        await bot.send_message(
+            chat_id=chat_id,
+            text="\n".join(link_lines),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        return
     await bot.send_message(
         chat_id=chat_id,
-        text="\n".join(lines),
+        text=text,
         parse_mode="HTML",
         disable_web_page_preview=True,
     )

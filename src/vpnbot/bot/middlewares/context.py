@@ -129,12 +129,48 @@ class BlockedUserMiddleware(BaseMiddleware):
     * admins are never gated — an admin whose personal user row is
       blocked keeps full panel access (blocking an admin's user row is
       refused in the service layer anyway).
+
+    On every drop, the user's FSM state is also cleared (when a
+    storage handle is configured): a blocked customer left
+    mid-checkout in ``awaiting_receipt`` would otherwise keep
+    earning ThrottleMiddleware's never-drop media delay — the
+    throttle runs BEFORE this gate — so a photo burst parked one
+    asyncio.sleep per message. Clearing on the first drop ends
+    the burst at one sleep; the stale checkout state is dead
+    anyway (block_user cancels the user's unpaid orders).
     """
 
     NOTICE_INTERVAL_SECONDS = 300.0
 
-    def __init__(self) -> None:
+    def __init__(self, storage: Any | None = None) -> None:
         self._notified_at: dict[int, float] = {}
+        self.storage = storage
+
+    async def _clear_blocked_state(self, event: TelegramObject, data: dict[str, Any]) -> None:
+        """Drop the blocked user's FSM state/data (best effort)."""
+        if self.storage is None:
+            return
+        bot = data.get("bot")
+        user = data.get("user")
+        if bot is None or user is None:
+            return
+        chat_id: int | None = None
+        if isinstance(event, Message) and event.chat is not None:
+            chat_id = event.chat.id
+        elif isinstance(event, CallbackQuery) and event.message is not None:
+            chat_id = event.message.chat.id
+        if chat_id is None:
+            return
+        try:
+            from aiogram.fsm.storage.base import StorageKey
+
+            key = StorageKey(
+                bot_id=int(bot.id), chat_id=int(chat_id), user_id=int(user.id)
+            )
+            await self.storage.set_state(key, None)
+            await self.storage.set_data(key, {})
+        except Exception:  # noqa: BLE001, S110 - clearing must never break the drop
+            pass
 
     def _notice_allowed(self, telegram_id: int | None) -> bool:
         """True (and stamps the cache) when this blocked user may be
@@ -168,11 +204,13 @@ class BlockedUserMiddleware(BaseMiddleware):
         telegram_id = getattr(user, "telegram_id", None)
         if isinstance(event, Message) and (event.text or "").startswith("/start"):
             if telegram_id is not None and not self._notice_allowed(telegram_id):
+                await self._clear_blocked_state(event, data)
                 return None  # already told recently; drop silently
             return await handler(event, data)
         if isinstance(event, CallbackQuery) and self._notice_allowed(telegram_id):
             with contextlib.suppress(Exception):
                 await event.answer("⛔️ دسترسی شما مسدود شده است", show_alert=True)
+        await self._clear_blocked_state(event, data)
         return None
 
 

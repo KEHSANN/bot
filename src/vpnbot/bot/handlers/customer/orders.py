@@ -41,6 +41,15 @@ router = Router(name="customer.orders")
 
 _REVEAL_AT: dict[int, float] = {}
 
+# Resend cooldown, mirroring _REVEAL_AT: without it, every tap on
+# «تلاش مجدد» pulled a backoff job forward to now and, for a FAILED
+# job, reset its attempt budget — a blocked (or stock-waiting)
+# customer could spam the worker into endless retries and an
+# unbounded audit/delivery_attempt trail. 60s per user bounds the
+# tap rate; the stamp is taken only on an accepted resend.
+_RESEND_AT: dict[int, float] = {}
+_RESEND_COOLDOWN_SECONDS = 60.0
+
 ORDER_LABELS: dict[OrderStatus, str] = {
     OrderStatus.PENDING_PAYMENT: "در انتظار پرداخت",
     OrderStatus.PAID: "پرداخت شده",
@@ -297,14 +306,26 @@ async def resend_config(
     ):
         await alert(callback, "این سفارش در وضعیت قابل ارسال مجدد نیست")
         return
+    import time as _time
+
     from vpnbot.services import fulfillment as fulfillment_service
 
+    now = _time.monotonic()
+    if now - _RESEND_AT.get(user.id, 0.0) < _RESEND_COOLDOWN_SECONDS:
+        await alert(callback, "⏳ درخواست ارسال مجدد تازه ثبت شده؛ کمی صبر کنید و دوباره تلاش کنید")
+        return
     queued = await fulfillment_service.enqueue_fulfill_job(session, order)
     # The job row must exist before we answer: commit first so a
     # Telegram hiccup cannot roll the enqueue back (the phase split
     # the rest of the customer side follows).
     await session.commit()
     if queued:
+        if len(_RESEND_AT) > 10_000:
+            # Evict the oldest entries instead of clear(): a full
+            # clear would reset every user's resend cooldown at once.
+            for stale_id, _ in sorted(_RESEND_AT.items(), key=lambda kv: kv[1])[:1_000]:
+                del _RESEND_AT[stale_id]
+        _RESEND_AT[user.id] = _time.monotonic()
         await alert(
             callback,
             "✅ درخواست ارسال مجدد ثبت شد؛ کانفیگ تا لحظاتی دیگر ارسال می‌شود.\n"

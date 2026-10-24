@@ -88,9 +88,11 @@ async def enqueue_fulfill_job(session: AsyncSession, order: Order) -> bool:
     The order row is locked first: a resend tap racing a live send
     must not rewrite SENDING back to PENDING (that would defeat
     cancel_order's SENDING guard, which exists because the config
-    may already be in the customer's chat). After a failed send the
-    status is RETRY_REQUIRED (see _record_failure), so the guard
-    does not block the backoff resend it exists to enable.
+    may already be in the customer's chat), and a tap racing a
+    completed delivery must not gain a fresh job for a FULFILLED
+    order. After a failed send the status is RETRY_REQUIRED (see
+    _record_failure), so the guard does not block the backoff
+    resend it exists to enable.
 
     Shared by the admin panel's requeue button and the customer's
     «receive again» button (the unblock-then-resend path: a delivery
@@ -105,10 +107,26 @@ async def enqueue_fulfill_job(session: AsyncSession, order: Order) -> bool:
 
     locked = (
         await session.execute(
-            select(OrderModel).where(OrderModel.id == order.id).with_for_update()
+            select(OrderModel)
+            .where(OrderModel.id == order.id)
+            .with_for_update()
+            # populate_existing: without it, a session-cached Order
+            # (loaded by the handler just before this call) keeps its
+            # stale attribute values even though the row was just
+            # locked and re-read — a fulfilment that completed in
+            # between would still look FULFILLMENT_PENDING here.
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
-    if locked is None or locked.delivery_status is DeliveryStatus.SENDING:
+    if (
+        locked is None
+        # Both pre-fulfilment states the worker gate accepts (the
+        # admin retry button shows for PAID too): anything else —
+        # FULFILLED, CANCELLED, PENDING_PAYMENT — must not gain a
+        # fresh fulfilment job from a racing tap.
+        or locked.status not in (OrderStatus.FULFILLMENT_PENDING, OrderStatus.PAID)
+        or locked.delivery_status is DeliveryStatus.SENDING
+    ):
         return False
 
     existing = (
@@ -243,6 +261,13 @@ async def _reserve_and_gate(
         order = await order_service.get_order(session, order_id, for_update=True)
         if order is None:
             raise PaymentGateError(f"order {order_id} not found")
+        # A customer blocked AFTER paying (e.g. while waiting for a
+        # restock or a send retry) must not receive the config: the
+        # worker used to reserve, decrypt and send it regardless,
+        # because the gate checked only the order and the payment.
+        user_row = await session.get(User, order.user_id)
+        if user_row is None or user_row.is_blocked:
+            return FulfillResult(FulfillOutcome.SKIPPED, order_id, "user blocked")
 
         # Lock the payment row too, so an approval cannot slip between the check
         # and the reservation.
