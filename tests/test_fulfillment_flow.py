@@ -194,14 +194,18 @@ async def test_failed_send_keeps_the_reservation_for_retry(
 async def test_paid_order_without_stock_waits_instead_of_being_lost(
     session, session_factory, cipher, fingerprint_secret, admin
 ) -> None:
+    # Round 29 moved the wait: approval now reserves the pair (wallet
+    # parity), so an approval with an empty shelf FAILS instead of
+    # queueing a job that discovers NO_INVENTORY at worker time.
+    # Nothing is lost — the receipt stays in review and the same
+    # approval succeeds once the pair is back on the shelf.
     user, order, payment = await _prepare_card_payment(session, cipher, fingerprint_secret)
     await payment_service.submit_card_receipt(
         session, payment_id=payment.id, user_id=user.id, file_id="r", file_type="photo"
     )
-    await payment_service.approve_payment(session, payment_id=payment.id, admin_id=admin.id)
     await session.commit()
 
-    # Someone sold the last pair between approval and the worker picking it up.
+    # Someone sold the last pair between receipt and approval.
     async with session_factory() as other:
         await other.execute(
             inventory_service.InventoryItem.__table__.update().values(
@@ -209,18 +213,28 @@ async def test_paid_order_without_stock_waits_instead_of_being_lost(
             )
         )
         await other.commit()
+    with pytest.raises(payment_service.PaymentError, match="موجودی"):
+        await payment_service.approve_payment(session, payment_id=payment.id, admin_id=admin.id)
+    await session.refresh(payment)
+    await session.refresh(order)
+    assert payment.status is PaymentStatus.PENDING_REVIEW
+    assert order.status is OrderStatus.PENDING_PAYMENT
 
-    recorder = DeliverRecorder()
-    result = await fulfillment.fulfill_order(
-        session_factory, order_id=order.id, cipher=cipher, deliver=recorder
+    # A fresh pair on the shelf; the same approval now succeeds.
+    from tests.test_admin_regressions import _stock
+
+    from vpnbot.db.models.catalog import Plan, Product
+
+    product = await session.get(Product, order.product_id)
+    plan = await session.get(Plan, order.plan_id)
+    await _stock(session, product, plan, 1, "restock")
+    await session.commit()
+    approved = await payment_service.approve_payment(
+        session, payment_id=payment.id, admin_id=admin.id
     )
-    assert result.outcome is fulfillment.FulfillOutcome.NO_INVENTORY
-    assert recorder.calls == []
-
-    async with session_factory() as check:
-        refreshed = await order_service.get_order(check, order.id)
-        assert refreshed is not None
-        assert refreshed.status is OrderStatus.FULFILLMENT_PENDING
+    assert approved.status is PaymentStatus.APPROVED
+    await session.refresh(order)
+    assert order.status is OrderStatus.FULFILLMENT_PENDING
 
 
 async def test_rejected_payment_cannot_be_fulfilled(

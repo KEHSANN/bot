@@ -76,17 +76,26 @@ async def block_user(session: AsyncSession, *, user_id: int, admin_id: int) -> d
             payment.status = PaymentStatus.CANCELLED
             payment.txid = None
             payments_cancelled += 1
-            # The ORDER must die with its payment: leaving it
-            # PENDING_PAYMENT stranded it forever — after unblock the
-            # customer faced three zombie orders, an unbreakable
-            # open-order cap, a TTL sweep that skipped
-            # CANCELLED-payment orders, and a cancel button that
-            # refused them as "under review".
-            order = await session.get(Order, payment.order_id)
-            if order is not None and order.status is OrderStatus.PENDING_PAYMENT:
-                order.status = OrderStatus.CANCELLED
-                order.notes = "لغو به‌دلیل مسدود شدن کاربر"
-                orders_cancelled += 1
+
+    # Cancel EVERY still-unpaid order straight from the Order table.
+    # The old code cancelled an order only via its payment row, so
+    # PENDING_PAYMENT orders with no payment row yet (a checkout
+    # preview created before the payment row exists) or with a
+    # REJECTED payment stayed open — and after unblock the customer
+    # faced zombie orders and the open-order cap. Paid orders
+    # (FULFILLMENT_PENDING) are deliberately untouched: blocking is
+    # not a refund, and their delivery is gated separately.
+    orders = (
+        await session.execute(
+            select(Order)
+            .where(Order.user_id == user_id, Order.status == OrderStatus.PENDING_PAYMENT)
+            .with_for_update()
+        )
+    ).scalars()
+    for order in orders:
+        order.status = OrderStatus.CANCELLED
+        order.notes = "لغو به‌دلیل مسدود شدن کاربر"
+        orders_cancelled += 1
 
     topups_cancelled = 0
     topups = (

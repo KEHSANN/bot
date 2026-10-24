@@ -158,15 +158,17 @@ async def test_cancel_frees_pair_wakes_waiting_order(session) -> None:
         {"enabled": True, "recipient_name": "تست", "card_number": "6037", "bank_name": "تست"},
     )
     _, product, plan = await make_catalog(session)
-    await _stock(session, product, plan, 1, "wake")
+    await _stock(session, product, plan, 2, "wake")
     await wallet_service.credit(
         session, user_id=user.id, amount_irt=plan.price_irt,
         kind=LedgerKind.TOPUP, key="wake:topup", reason="t",
     )
-    # Order B is created and card-approved FIRST: approval does not
-    # reserve, so its fulfilment job waits on the shelf. (create_order
-    # itself refuses once the shelf is empty, so B cannot be created
-    # after A takes the pair.)
+    # Round 29: card approval reserves its pair, so the old
+    # choreography (B approved-unreserved, A takes the pair) is no
+    # longer possible. The test's point — cancel frees a pair and
+    # requeue_pending_for_product revives a FAILED job — is kept
+    # with two pairs: B holds one, A holds the other, B's job is
+    # FAILED, and cancelling A revives it.
     order_b = await order_service.create_order(
         session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
     )
@@ -180,8 +182,7 @@ async def test_cancel_frees_pair_wakes_waiting_order(session) -> None:
     await payment_service.approve_payment(
         session, payment_id=payment_b.id, admin_id=admin.id
     )
-    # Order A then wallet-pays and takes the only pair; B's job
-    # exhausts into FAILED on NO_INVENTORY.
+    # Order A then wallet-pays and takes the second pair.
     order_a = await order_service.create_order(
         session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
     )

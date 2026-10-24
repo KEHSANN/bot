@@ -348,7 +348,7 @@ async def compose_input(
             # recipient — thousands of retried jobs for one typo'd tag.
             screen_service._validate_html(raw, "متن همگانی")
         except screen_service.TemplateError as exc:
-            await message.answer(f"⚠️ {exc}\nمتن را اصلاح و دوباره بفرستید.")
+            await message.answer(f"⚠️ {common.escape(str(exc))}\nمتن را اصلاح و دوباره بفرستید.")
             return
         await state.update_data(broadcast_text=raw, stage="title")
         await message.answer(
