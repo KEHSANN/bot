@@ -26,6 +26,10 @@ router = Router(name="customer.support")
 async def open_support(
     callback: CallbackQuery, session: AsyncSession, user: User | None, state: FSMContext
 ) -> None:
+    if user is not None:
+        from vpnbot.bot.handlers.customer.menu import cancel_open_order_from_state
+
+        await cancel_open_order_from_state(session, user, state)
     await state.clear()  # navigation resets any in-progress wizard state
     if user is None:
         await callback.answer()
@@ -86,6 +90,7 @@ async def receive_ticket(
         return
 
     await state.clear()
+    await session.commit()  # confirm only after the ticket actually lands
     await message.answer(
         f"✅ پیام شما ثبت شد (تیکت #{ticket.id}).\n"
         "پاسخ پشتیبانی در همین گفتگو برای شما ارسال می‌شود."

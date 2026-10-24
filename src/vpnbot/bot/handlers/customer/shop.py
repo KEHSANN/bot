@@ -68,6 +68,9 @@ def _plan_details(plan: Plan) -> str:
 async def open_shop(
     callback: CallbackQuery, session: AsyncSession, user: User | None, state: FSMContext
 ) -> None:
+    from vpnbot.bot.handlers.customer.menu import cancel_open_order_from_state
+
+    await cancel_open_order_from_state(session, user, state)
     await state.clear()  # navigation resets any in-progress wizard state
     categories = await catalog_service.list_categories(session)
     rows = [
@@ -175,6 +178,9 @@ async def products_page(
     user: User | None,
     state: FSMContext,
 ) -> None:
+    from vpnbot.bot.handlers.customer.menu import cancel_open_order_from_state
+
+    await cancel_open_order_from_state(session, user, state)
     await state.clear()
     await _show_products(callback, session, user, category_id=0, page=callback_data.page)
 

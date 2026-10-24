@@ -89,7 +89,12 @@ async def open_wallet(
     if user is None:
         await callback.answer()
         return
-    # Opening the wallet abandons any half-finished top-up draft.
+    # Opening the wallet abandons any half-finished top-up draft —
+    # and any half-finished checkout order (same cap-lock as /cancel
+    # without the cancel).
+    from vpnbot.bot.handlers.customer.menu import cancel_open_order_from_state
+
+    await cancel_open_order_from_state(session, user, state)
     await state.clear()
     await _show_wallet(callback, session, user)
 
@@ -161,7 +166,10 @@ async def topup_amount(
     )
 
 
-@router.callback_query(MenuCB.filter(F.action.in_({"topup_card", "topup_crypto"})))
+@router.callback_query(
+    MenuCB.filter(F.action.in_({"topup_card", "topup_crypto"})),
+    WalletStates.choosing_method,
+)
 async def topup_method(
     callback: CallbackQuery,
     callback_data: MenuCB,

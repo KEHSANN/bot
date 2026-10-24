@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
@@ -183,13 +184,21 @@ def _split_line(text: str) -> tuple[str, str]:
         # — splitting at the FIRST occurrence (the old rule) mangled
         # both sides: the config absorbed its glued-on link, and a
         # comma inside the link's query truncated the link.
-        marker = max(text.rfind(sep + "http://"), text.rfind(sep + "https://"))
-        if marker > 0:
-            config = text[:marker].strip()
-            rest = text[marker + len(sep) :]
-            # A trailing "|label" column (pair format) is ignored;
-            # a raw "|" cannot appear inside a valid URL anyway.
-            sub = rest.split("|", 1)[0].strip()
+        #
+        # Case-insensitive (a link may arrive as HTTPS://...): the
+        # regex runs on the ORIGINAL text so indices stay valid
+        # (lower() can change string length for exotic characters).
+        matches = list(
+            re.finditer(re.escape(sep) + r"https?://", text, flags=re.IGNORECASE)
+        )
+        if matches and matches[-1].start() > 0:
+            match = matches[-1]
+            config = text[: match.start()].strip()
+            rest = text[match.start() + len(sep) :]
+            # A trailing label column (pair format) is ignored; it
+            # may be pipe- OR tab-delimited, and a raw "|" or tab
+            # cannot appear inside a valid URL anyway.
+            sub = re.split(r"[|\t]", rest, maxsplit=1)[0].strip()
             return config, sub
     # Pair-shaped lines whose right side is NOT a URL: a "|" or TAB
     # appearing BEFORE any "#" fragment is the pair separator, so

@@ -130,6 +130,9 @@ async def my_orders(
     user: User | None,
     state: FSMContext,
 ) -> None:
+    from vpnbot.bot.handlers.customer.menu import cancel_open_order_from_state
+
+    await cancel_open_order_from_state(session, user, state)
     await state.clear()  # navigation resets any in-progress wizard state
     await _show_page(callback, session, user, callback_data.page)
 

@@ -73,11 +73,24 @@ class PaymentGateError(RuntimeError):
 async def enqueue_fulfill_job(session: AsyncSession, order: Order) -> bool:
     """(Re)queue the one canonical fulfilment job for a paid order.
 
-    Returns False when a live job (QUEUED/RUNNING) already exists —
-    the caller is then just early, not wrong. A finished or failed
-    job is revived in place under the same ``fulfill:<id>`` key: the
-    old ``:retry:<timestamp>`` key minted a SECOND live job whenever
-    it raced a restock requeue, and the config was delivered twice.
+    Returns False when a live job already exists AND is due or
+    running — the caller is then just early, not wrong. A finished
+    or failed job is revived in place under the same ``fulfill:<id>``
+    key: the old ``:retry:<timestamp>`` key minted a SECOND live job
+    whenever it raced a restock requeue, and the config was
+    delivered twice. A QUEUED job parked in backoff (scheduled_at in
+    the future) is pulled forward to now instead of being reported
+    as "already queued": otherwise the customer's «receive again»
+    button (and the admin's) is dead for the whole backoff window
+    after every failed send, even though the user may already have
+    unblocked the bot.
+
+    The order row is locked first: a resend tap racing a live send
+    must not rewrite SENDING back to PENDING (that would defeat
+    cancel_order's SENDING guard, which exists because the config
+    may already be in the customer's chat). After a failed send the
+    status is RETRY_REQUIRED (see _record_failure), so the guard
+    does not block the backoff resend it exists to enable.
 
     Shared by the admin panel's requeue button and the customer's
     «receive again» button (the unblock-then-resend path: a delivery
@@ -87,19 +100,35 @@ async def enqueue_fulfill_job(session: AsyncSession, order: Order) -> bool:
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     from vpnbot.db.enums import JobKind, JobStatus
+    from vpnbot.db.models.orders import Order as OrderModel
     from vpnbot.db.models.system import Job
+
+    locked = (
+        await session.execute(
+            select(OrderModel).where(OrderModel.id == order.id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if locked is None or locked.delivery_status is DeliveryStatus.SENDING:
+        return False
 
     existing = (
         await session.execute(
-            select(Job.id).where(
+            select(Job).where(
                 Job.kind == JobKind.FULFILL_ORDER,
                 Job.idempotency_key == f"fulfill:{order.id}",
                 Job.status.in_([JobStatus.QUEUED, JobStatus.RUNNING]),
             )
         )
-    ).first()
+    ).scalar_one_or_none()
     if existing is not None:
-        return False
+        if existing.status is JobStatus.RUNNING or existing.scheduled_at <= utcnow():
+            return False
+        # Backoff: pull the schedule forward; the attempt budget and
+        # the error history stay untouched.
+        existing.scheduled_at = utcnow()
+        locked.delivery_status = DeliveryStatus.PENDING
+        await session.flush()
+        return True
     await session.execute(
         pg_insert(Job)
         .values(
@@ -121,7 +150,7 @@ async def enqueue_fulfill_job(session: AsyncSession, order: Order) -> bool:
             where=Job.status.in_([JobStatus.FAILED, JobStatus.DONE, JobStatus.QUEUED]),
         )
     )
-    order.delivery_status = DeliveryStatus.PENDING
+    locked.delivery_status = DeliveryStatus.PENDING
     await session.flush()
     return True
 
