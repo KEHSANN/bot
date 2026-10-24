@@ -76,7 +76,7 @@ async def test_admin_force_cancel_settles_failed_delivery(session) -> None:
     # The worker tried; the customer had blocked the bot.
     await inventory_service.log_attempt(
         session, order_id=order.id, item_id=item.id,
-        outcome="FAILED", error_code="TelegramForbiddenError",
+        outcome="FAILED", error_code="TelegramNetworkError",
     )
     await session.commit()
 

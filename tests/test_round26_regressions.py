@@ -34,9 +34,12 @@ async def test_force_cancel_disables_pair_and_unblocks_product_delete(session) -
     payment = await payment_service.pay_order_with_wallet(session, order=order, user_id=user.id)
     item = await inventory_service.item_for_order(session, order.id)
     assert item is not None
+    # A NON-Forbidden failure: delivery is genuinely uncertain, so
+    # the pair quarantines to DISABLED. (An all-TelegramForbiddenError
+    # failure repools to AVAILABLE since round 28 — see its tests.)
     await inventory_service.log_attempt(
         session, order_id=order.id, item_id=item.id,
-        outcome="FAILED", error_code="TelegramForbiddenError",
+        outcome="FAILED", error_code="TelegramNetworkError",
     )
     await session.commit()
 

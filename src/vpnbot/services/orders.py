@@ -332,9 +332,11 @@ async def cancel_order(
     outcomes = list(
         (
             await session.execute(
-                select(DeliveryAttempt.outcome).where(DeliveryAttempt.order_id == order.id)
+                select(DeliveryAttempt.outcome, DeliveryAttempt.error_code).where(
+                    DeliveryAttempt.order_id == order.id
+                )
             )
-        ).scalars()
+        ).all()
     )
     attempts = len(outcomes)
     if attempts > 0:
@@ -342,7 +344,7 @@ async def cancel_order(
         # with the customer: cancelling would refund a delivered
         # config, so even an admin cannot force those — settlement
         # for them stays fully manual, outside the cancel path.
-        if any(outcome != "FAILED" for outcome in outcomes):
+        if any(outcome != "FAILED" for outcome, _ in outcomes):
             raise OrderError(
                 "برای این سفارش تلاش تحویل موفق یا نامشخص ثبت شده است؛ لغو ممکن نیست "
                 "(احتمال تحویل کانفیگ). برای بررسی دستی با پشتیبانی هماهنگ کنید"
@@ -354,14 +356,11 @@ async def cancel_order(
             )
         # force + every attempt FAILED (e.g. the customer blocked
         # the bot — delivery provably never landed): the admin
-        # settles the order here. It cancels and refunds below, but
-        # the pair is NOT repooled — the repool further down stays
-        # gated on attempts == 0 — because a network-ambiguous
-        # failure keeps a small chance the config did arrive; the
-        # pair stays quarantined to this order rather than risk a
-        # double sale. Without this path such orders were stuck
-        # forever: paid, undeliverable, and uncancellable even from
-        # the admin panel.
+        # settles the order here. It cancels and refunds below; what
+        # happens to the pair depends on WHY the sends failed (see
+        # the branches further down). Without this path such orders
+        # were stuck forever: paid, undeliverable, and uncancellable
+        # even from the admin panel.
 
     order.status = OrderStatus.CANCELLED
     order.notes = reason
@@ -398,6 +397,11 @@ async def cancel_order(
         if not was_approved:
             payment.txid = None
 
+    # A pair returns to the pool only when this cancel actually frees
+    # one; only then are the product's waiting paid orders woken
+    # (requeueing with an empty shelf would just burn their jobs'
+    # retry budgets again — the NO_INVENTORY path).
+    freed_stock = False
     if attempts == 0:
         item = await inventory_service.item_for_order(session, order.id)
         if item is not None and item.status is InventoryStatus.RESERVED:
@@ -411,26 +415,54 @@ async def cancel_order(
             ).scalar_one_or_none()
             if assignment is not None:
                 await session.delete(assignment)
+            freed_stock = True
     elif force:
-        # Forced settlement of an all-FAILED order: the pair leaves
-        # the RESERVED limbo for DISABLED. It stays burned (never
-        # resold — a network-ambiguous failure might have delivered
-        # it), but RESERVED-forever was a lockup of its own: the
-        # item could not be disabled (disable_item refuses RESERVED),
-        # the product could not be deleted (deletion refuses
-        # RESERVED), and the stock stats counted it as in-flight
-        # forever — so a customer could burn one pair per
-        # buy/block/refund cycle at zero net cost. DISABLED is the
-        # terminal quarantine state: out of the counts, deletable
-        # with its product, still never sellable again. The
-        # assignment row stays as the historical record.
+        # Forced settlement of an all-FAILED order. The pair's fate
+        # depends on WHY every send failed:
+        #
+        # * All attempts TelegramForbiddenError: Telegram refused
+        #   the sends, so the secret provably never reached anyone
+        #   — the pair is repooled exactly like the attempts==0
+        #   path. DISABLED here would keep the round-26 burn alive:
+        #   one funded account could still empty the whole shelf
+        #   one buy/block/refund cycle at a time, at zero net cost.
+        # * Anything else (timeouts, network errors, unknown codes):
+        #   delivery is genuinely uncertain, so the pair stays
+        #   quarantined to DISABLED — terminal, out of the counts,
+        #   deletable with its product, still never sellable again.
+        #   The assignment row stays as the historical record.
         from vpnbot.db.base import utcnow
 
         item = await inventory_service.item_for_order(session, order.id)
         if item is not None and item.status is InventoryStatus.RESERVED:
-            item.status = InventoryStatus.DISABLED
-            item.disabled_at = utcnow()
-            item.disabled_reason = "force-cancelled after failed delivery"
+            if all(code == "TelegramForbiddenError" for _, code in outcomes):
+                item.status = InventoryStatus.AVAILABLE
+                item.assigned_order_id = None
+                item.reserved_at = None
+                assignment = (
+                    await session.execute(
+                        select(InventoryAssignment).where(
+                            InventoryAssignment.order_id == order.id
+                        )
+                    )
+                ).scalar_one_or_none()
+                if assignment is not None:
+                    await session.delete(assignment)
+                freed_stock = True
+            else:
+                item.status = InventoryStatus.DISABLED
+                item.disabled_at = utcnow()
+                item.disabled_reason = "force-cancelled after failed delivery"
+
+    if freed_stock:
+        # A pair just came back: wake the product's paid-but-waiting
+        # orders (previously only a restock import did this, so a
+        # cancel-freed pair left them asleep until the next import).
+        from vpnbot.services import fulfillment as fulfillment_service
+
+        await fulfillment_service.requeue_pending_for_product(
+            session, product_id=order.product_id
+        )
 
     # Wallet-paid orders refund themselves back to the wallet,
     # exactly once (ledger idempotency key). Card/crypto payments

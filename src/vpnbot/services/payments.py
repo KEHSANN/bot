@@ -207,8 +207,13 @@ def _hash_from_link(cleaned: str) -> str | None:
     """
     if "/" not in cleaned or not _URLISH_RE.match(cleaned):
         return None
-    segment = next((part for part in reversed(cleaned.split("/")) if part), "")
-    segment = segment.split("?", 1)[0].split("&", 1)[0].split("#", 1)[0]
+    # Strip the query string BEFORE splitting on "/": a query may
+    # itself contain slashes (?redirect=https://...) and the last
+    # "/" segment would then be the redirect's tail ("tx"), not
+    # the hash — rejecting a perfectly valid link.
+    without_query = cleaned.split("?", 1)[0].split("&", 1)[0]
+    segment = next((part for part in reversed(without_query.split("/")) if part), "")
+    segment = segment.split("#", 1)[0]
     candidate = segment.replace("-", "").replace("_", "")
     while candidate.startswith("0x"):
         candidate = candidate[2:]
