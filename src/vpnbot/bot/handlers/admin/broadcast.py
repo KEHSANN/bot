@@ -79,7 +79,7 @@ async def _show_campaign(
 ) -> None:
     campaign = await session.get(BroadcastCampaign, campaign_id)
     if campaign is None:
-        await common.reply(target, "کمپین یافت نشد.", [[common.back("broadcast")]])
+        await common.reply(target, "کمپین یافت نشد.", [[common.back("broadcast")]], session=session)
         return
     lines = [
         f"<b>📨 کمپین #{campaign.id}</b>",
@@ -105,7 +105,7 @@ async def _show_campaign(
         rows.append([common.btn("⛔️ لغو کمپین", "broadcast", "stop", campaign.id)])
     rows.append([common.btn("🔄 بروزرسانی", "broadcast", "view", campaign.id)])
     rows.append([common.back("broadcast")])
-    await common.reply(target, "\n".join(lines), rows)
+    await common.reply(target, "\n".join(lines), rows, session=session)
 
 
 async def _show_list(
@@ -144,7 +144,8 @@ async def _show_list(
     rows.append([common.btn("➕ کمپین جدید", "broadcast", "new")])
     rows.append([common.back()])
     await common.reply(
-        target, f"<b>📨 پیام همگانی</b>\n\nتعداد کمپین‌ها: {common.money(total)}", rows
+        target, f"<b>📨 پیام همگانی</b>\n\nتعداد کمپین‌ها: {common.money(total)}", rows,
+        session=session,
     )
 
 
@@ -172,6 +173,7 @@ async def broadcast_router(
             f"متن پیام را بفرستید (حداکثر {MAX_TEXT} کاراکتر).\n"
             "HTML مجاز است: <code>&lt;b&gt;</code>، <code>&lt;i&gt;</code>، <code>&lt;a href&gt;</code>.",
             [common.cancel_row()],
+            session=session,
         )
         return
 
@@ -266,6 +268,7 @@ async def broadcast_router(
                 [common.btn("▶️ شروع ارسال", "broadcast", "start", campaign.id)],
                 [common.btn("⬅️ کمپین‌ها", "broadcast")],
             ],
+            session=session,
         )
         return
 

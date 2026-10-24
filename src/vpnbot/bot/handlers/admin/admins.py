@@ -98,6 +98,7 @@ async def _show_list(
         f"<b>👤 مدیران</b>\n\n"
         f"تعداد کل: {common.money(total)} · مالک فعال: {common.money(owners)}",
         rows,
+        session=session,
     )
 
 
@@ -119,7 +120,7 @@ async def _show_admin(
         )
     ).scalar_one_or_none()
     if item is None:
-        await common.reply(target, "مدیر یافت نشد.", [[common.back("admins")]])
+        await common.reply(target, "مدیر یافت نشد.", [[common.back("admins")]], session=session)
         return
     user = item.user
     lines = [
@@ -155,7 +156,7 @@ async def _show_admin(
     else:
         rows.append([common.btn("✅ فعال کردن", "admins", "activate", item.id)])
     rows.append([common.back("admins")])
-    await common.reply(target, "\n".join(lines), rows)
+    await common.reply(target, "\n".join(lines), rows, session=session)
 
 
 def _check_self_and_last_owner(admin: Admin, item: Admin, owners: int) -> str | None:
@@ -205,6 +206,7 @@ async def admins_router(
             "شناسه عددی تلگرام کاربر را بفرستید.\n"
             "برای پیدا کردن شناسه، کاربر می‌تواند از ربات @userinfobot استفاده کند.",
             [common.cancel_row()],
+            session=session,
         )
         return
 
@@ -253,6 +255,7 @@ async def admins_router(
             f"<b>⛔️ غیرفعال کردن دسترسی</b>\n\n{_user_line(item)}\n\n"
             "با این کار این حساب دیگر به پنل دسترسی نخواهد داشت. مطمئن هستید؟",
             [common.yes_no("admins", "revoke", item.id), [common.back("admins")]],
+            session=session,
         )
         return
 

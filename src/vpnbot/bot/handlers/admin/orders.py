@@ -258,8 +258,10 @@ async def cancel_input(
     try:
         # Admin-initiated cancel IS the manual review: force lets it
         # settle orders whose delivery attempts all FAILED (e.g. the
-        # customer blocked the bot) — refund without repooling the
-        # pair. SENT/UNCERTAIN attempts still refuse in the service.
+        # customer blocked the bot). SENT/UNCERTAIN attempts still
+        # refuse in the service; an all-Forbidden failure repools
+        # the provably-undelivered pair, anything else quarantines
+        # it to DISABLED.
         order = await order_service.cancel_order(session, order_id, reason=reason[:500], force=True)
     except order_service.OrderError as exc:
         await state.clear()
@@ -274,5 +276,6 @@ async def cancel_input(
         data={"reason": reason[:500]},
     )
     await state.clear()
+    await session.commit()  # tell the admin only after the cancel lands
     await message.answer(f"⛔️ سفارش {order.public_id} لغو شد.")
     await _show_list(message, session, admin, "all", 0)

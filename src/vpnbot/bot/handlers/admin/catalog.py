@@ -87,7 +87,7 @@ async def _show_categories(target: CallbackQuery | Message, session: AsyncSessio
         f"<b>{common.money(sum(counts.values()))}</b>\n\n"
         "برای مدیریت محصولات یک دسته را انتخاب کنید."
     )
-    await common.reply(target, text, rows)
+    await common.reply(target, text, rows, session=session)
 
 
 async def _show_products(
@@ -141,13 +141,14 @@ async def _show_products(
         f"تعداد: {common.money(total)}\n"
         "🟢 فعال و قابل فروش · ⚪️ غیرفعال · 📦 آرشیو",
         rows,
+        session=session,
     )
 
 
 async def _show_product(target: CallbackQuery | Message, session: AsyncSession, admin: Admin, product_id: int) -> None:
     product = await catalog_service.get_product(session, product_id)
     if product is None:
-        await common.reply(target, "محصول یافت نشد.", [[common.back("catalog")]])
+        await common.reply(target, "محصول یافت نشد.", [[common.back("catalog")]], session=session)
         return
     stock = await catalog_service.available_plan_ids(session, product.id)
     plans = [p for p in product.plans if p.archived_at is None]
@@ -259,13 +260,13 @@ async def _show_product(target: CallbackQuery | Message, session: AsyncSession, 
     )
     rows.append([common.btn("🗑 حذف کامل محصول", "product", "delete", product.id)])
     rows.append([common.back("catalog")])
-    await common.reply(target, "\n".join(lines), rows)
+    await common.reply(target, "\n".join(lines), rows, session=session)
 
 
 async def _show_plan(target: CallbackQuery | Message, session: AsyncSession, admin: Admin, plan_id: int) -> None:
     plan = await catalog_service.get_plan(session, plan_id)
     if plan is None:
-        await common.reply(target, "پلن یافت نشد.", [[common.back("catalog")]])
+        await common.reply(target, "پلن یافت نشد.", [[common.back("catalog")]], session=session)
         return
     stock = await catalog_service.stock_for_plan(session, plan.product_id, plan.id)
     text = "\n".join(
@@ -301,7 +302,7 @@ async def _show_plan(target: CallbackQuery | Message, session: AsyncSession, adm
         [common.btn("🗄 آرشیو پلن", "plan", "archive", plan.id)],
         [common.btn("⬅️ محصول", "product", "", plan.product_id)],
     ]
-    await common.reply(target, text, rows)
+    await common.reply(target, text, rows, session=session)
 
 
 # --------------------------------------------------------------------------
@@ -335,6 +336,7 @@ async def catalog_router(
             "<b>➕ دسته‌بندی جدید</b>\n\nنام دسته را بفرستید. برای تعیین ترتیب:\n"
             "<code>نام | ترتیب</code>",
             [common.cancel_row()],
+            session=session,
         )
     elif action == "new":
         await state.set_state(AdminStates.product_create)
@@ -344,6 +346,7 @@ async def catalog_router(
             callback,
             "<b>➕ محصول جدید — گام ۱ از ۳</b>\n\nعنوان محصول را بفرستید.",
             [common.cancel_row()],
+            session=session,
         )
     elif action == "pick_cat":
         data = await state.get_data()
@@ -368,7 +371,7 @@ async def catalog_router(
             )
         except catalog_service.CatalogError as exc:
             await state.clear()
-            await common.reply(callback, f"⚠️ {exc}", [[common.back("catalog")]])
+            await common.reply(callback, f"⚠️ {exc}", [[common.back("catalog")]], session=session)
             return
         # Clear the wizard state only once creation has actually succeeded:
         # clearing first meant a failure silently discarded the whole draft
@@ -428,7 +431,7 @@ async def product_router(
         await state.set_state(AdminStates.product_edit)
         await state.update_data(field="title", product_id=product.id)
         await callback.answer()
-        await common.reply(callback, "عنوان جدید محصول را بفرستید.", [common.cancel_row()])
+        await common.reply(callback, "عنوان جدید محصول را بفرستید.", [common.cancel_row()], session=session)
         return
     if action == "toggle":
         product.is_active = not product.is_active
@@ -489,6 +492,7 @@ async def product_router(
             "و باید آرشیوش کنید.\n\n"
             "مطمئنید؟",
             [common.yes_no("product", "delete_yes", product.id), [common.back("catalog")]],
+            session=session,
         )
         return
     elif action == "delete_yes":
@@ -532,6 +536,7 @@ async def plans_router(
         callback,
         "<b>➕ پلن جدید — گام ۱ از ۴</b>\n\nعنوان پلن را بفرستید (مثال: یک ماهه ۵۰ گیگ).",
         [common.cancel_row()],
+        session=session,
     )
 
 
@@ -563,7 +568,7 @@ async def plan_router(
         await state.set_state(AdminStates.plan_edit)
         await state.update_data(field=field, plan_id=plan.id)
         await callback.answer()
-        await common.reply(callback, prompt, [common.cancel_row()])
+        await common.reply(callback, prompt, [common.cancel_row()], session=session)
         return
     if action == "toggle":
         plan.is_active = not plan.is_active
@@ -625,7 +630,7 @@ async def product_input(message: Message, session: AsyncSession, admin: Admin | 
     rows = [[common.btn(f"📁 {c.title}", "catalog", "pick_cat", c.id)] for c in categories]
     rows.append([common.btn("بدون دسته", "catalog", "pick_cat", 0)])
     rows.append(common.cancel_row())
-    await common.reply(message, "<b>➕ محصول جدید — گام ۲ از ۳</b>\n\nدسته محصول را انتخاب کنید.", rows)
+    await common.reply(message, "<b>➕ محصول جدید — گام ۲ از ۳</b>\n\nدسته محصول را انتخاب کنید.", rows, session=session)
 
 
 @router.message(AdminStates.product_edit)

@@ -75,6 +75,7 @@ async def _overview(
         target,
         "<b>📦 انبار</b>\n\nمحصول را برای مشاهده موجودی و آیتم‌ها انتخاب کنید.",
         rows,
+        session=session,
     )
 
 
@@ -88,7 +89,7 @@ async def _product_items(
 ) -> None:
     product = await catalog_service.get_product(session, product_id)
     if product is None:
-        await common.reply(target, "محصول یافت نشد.", [[common.back("inventory")]])
+        await common.reply(target, "محصول یافت نشد.", [[common.back("inventory")]], session=session)
         return
     status = STATUS_FILTERS.get(status_key)
 
@@ -146,7 +147,7 @@ async def _product_items(
         f"⛔️ غیرفعال: {common.money(counts.disabled)}\n\n"
         f"آیتم‌های نمایش‌داده‌شده: {common.money(len(items))} از {common.money(total)}"
     )
-    await common.reply(target, text, rows)
+    await common.reply(target, text, rows, session=session)
 
 
 async def _show_item(
@@ -154,7 +155,7 @@ async def _show_item(
 ) -> None:
     item = await session.get(InventoryItem, item_id)
     if item is None:
-        await common.reply(target, "آیتم یافت نشد.", [[common.back("inventory")]])
+        await common.reply(target, "آیتم یافت نشد.", [[common.back("inventory")]], session=session)
         return
     plan = await session.get(Plan, item.plan_id) if item.plan_id else None
     lines = [
@@ -178,7 +179,7 @@ async def _show_item(
     if item.status in (InventoryStatus.AVAILABLE, InventoryStatus.DISABLED):
         rows.append([common.btn("⛔️ غیرفعال‌سازی", "inventory", "disable", item.id)])
     rows.append([common.btn("⬅️ بازگشت", "inventory", "product", item.product_id)])
-    await common.reply(target, "\n".join(lines), rows)
+    await common.reply(target, "\n".join(lines), rows, session=session)
 
 
 @router.callback_query(AdminCB.filter(F.section == "inventory"))
