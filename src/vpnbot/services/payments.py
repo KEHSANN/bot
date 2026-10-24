@@ -353,12 +353,32 @@ async def _require_order_payable(session: AsyncSession, payment: Payment) -> Non
     REJECTED, which cancel left untouched): the payment went back to
     PENDING_REVIEW, entered the admin queue, and approval then failed
     on the cancelled order — a zombie review item forever.
+
+    The catalogue is also re-checked: between order creation and
+    receipt submission (up to the TTL) the product or plan may have
+    been disabled or archived, or the shelf may have emptied — and
+    accepting the receipt anyway strands a customer who already paid
+    off-platform on an order the worker can never fulfil
+    (NO_INVENTORY). A refused receipt leaves the order
+    PENDING_PAYMENT, so the customer can retry after a restock.
     """
+    from vpnbot.db.models.catalog import Plan, Product
+    from vpnbot.services import catalog as catalog_service
+
     order = await session.get(Order, payment.order_id)
     if order is None or order.status is not OrderStatus.PENDING_PAYMENT:
         raise PaymentError("این سفارش دیگر قابل پرداخت نیست")
     if payment.expires_at is not None and payment.expires_at < utcnow():
         raise PaymentError("مهلت ارسال رسید این سفارش تمام شده است")
+    product = await session.get(Product, order.product_id)
+    if product is None or not product.is_on_sale:
+        raise PaymentError("این محصول در حال حاضر قابل خرید نیست")
+    if order.plan_id is not None:
+        plan = await session.get(Plan, order.plan_id)
+        if plan is None or not plan.is_on_sale:
+            raise PaymentError("این پلن در حال حاضر قابل خرید نیست")
+    if await catalog_service.stock_for_plan(session, order.product_id, order.plan_id) <= 0:
+        raise PaymentError("موجودی این محصول به پایان رسیده است")
 
 
 async def pay_order_with_wallet(
@@ -555,6 +575,23 @@ async def approve_payment(
     await _guard_self_approval(session, admin_id=admin_id, target_user_id=order.user_id)
     if order.status not in (OrderStatus.PENDING_PAYMENT, OrderStatus.PAID):
         raise PaymentError("وضعیت سفارش اجازه تأیید پرداخت را نمی‌دهد")
+
+    # Reserve the pair inside the approval transaction, like the
+    # wallet path does at pay time: without it, approval enqueued a
+    # job that only discovered an empty shelf at worker time, and a
+    # wallet buyer could take the last pair between approval and the
+    # worker run. If the shelf is empty the approval now fails with
+    # a clear message and the receipt stays in review, so the admin
+    # approves again after a restock instead of stranding a paid
+    # order in NO_INVENTORY.
+    from vpnbot.services import inventory as inventory_service
+
+    try:
+        await inventory_service.reserve_for_order(session, order=order)
+    except inventory_service.NoInventoryAvailable:
+        raise PaymentError(
+            "موجودی این محصول به پایان رسیده است؛ پس از شارژ انبار دوباره تأیید کنید"
+        ) from None
 
     now = utcnow()
     payment.status = PaymentStatus.APPROVED

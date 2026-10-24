@@ -796,7 +796,7 @@ async def message_input(
             messages[position][field] = raw
         await service.save_draft(stage, messages=messages)
     except screen_service.TemplateError as exc:
-        await message.answer(f"⚠️ {exc}\n\nدوباره بفرستید یا /cancel را بزنید.")
+        await message.answer(f"⚠️ {common.escape(str(exc))}\n\nدوباره بفرستید یا /cancel را بزنید.")
         return
 
     await common.audit(
@@ -869,7 +869,7 @@ async def button_input(
             buttons[position] = button
         await service.save_draft(stage, buttons=buttons)
     except screen_service.TemplateError as exc:
-        await message.answer(f"⚠️ {exc}\n\nدوباره بفرستید یا /cancel را بزنید.")
+        await message.answer(f"⚠️ {common.escape(str(exc))}\n\nدوباره بفرستید یا /cancel را بزنید.")
         return
     except ValueError:
         await message.answer("⚠️ ردیف باید عدد باشد. دوباره بفرستید یا /cancel را بزنید.")

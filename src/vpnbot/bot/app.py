@@ -104,7 +104,9 @@ def build_dispatcher(
     session_mw = DbSessionMiddleware(session_factory)
     user_mw = UserLoaderMiddleware()
     admin_mw = AdminLoaderMiddleware()
-    blocked_mw = BlockedUserMiddleware()
+    # The blocked gate clears the dropped user's FSM state (see its
+    # docstring), so it needs the same storage the throttle reads.
+    blocked_mw = BlockedUserMiddleware(storage=fsm_storage)
     # The throttle reads FSM state from the same storage to scope its
     # never-drop media delay to flows that actually expect a file.
     throttle_mw = ThrottleMiddleware(storage=fsm_storage)
