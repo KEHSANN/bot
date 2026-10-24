@@ -2925,16 +2925,31 @@ async def test_admin_requeue_uses_canonical_key(session) -> None:
     from tests.factories import make_catalog, make_user
 
     from vpnbot.bot.handlers.admin.orders import _requeue
-    from vpnbot.db.enums import JobStatus
+    from vpnbot.db.enums import JobStatus, LedgerKind
     from vpnbot.db.models.system import Job
     from vpnbot.services import orders as order_service
+    from vpnbot.services import payments as payment_service
+    from vpnbot.services import wallet as wallet_service
 
     user = await make_user(session, telegram_id=900002301)
     _, product, plan = await make_catalog(session)
     await _stock(session, product, plan, 1, "req")
+    await wallet_service.credit(
+        session, user_id=user.id, amount_irt=plan.price_irt,
+        kind=LedgerKind.TOPUP, key="req:topup", reason="t",
+    )
     order = await order_service.create_order(
         session, user_id=user.id, plan_id=plan.id, product=product, plan=plan
     )
+    # Round 29: enqueue refuses orders that are not awaiting
+    # fulfilment, so the order must be FULFILLMENT_PENDING first.
+    # Wallet pay already queues a job, so drop it — the test's point
+    # is the canonical key of the job _requeue inserts, not the pay.
+    await payment_service.pay_order_with_wallet(session, order=order, user_id=user.id)
+    from sqlalchemy import delete
+
+    await session.execute(delete(Job).where(Job.idempotency_key == f"fulfill:{order.id}"))
+    await session.commit()
     assert await _requeue(session, order) is True
     assert await _requeue(session, order) is False  # already queued — no twin job
     rows = (
